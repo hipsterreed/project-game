@@ -1,0 +1,69 @@
+PLACEHOLDER SOUND MANIFEST
+==========================
+
+The game runs entirely on procedurally synthesized audio out of the box —
+nothing in this folder is required. Drop in real recordings with the exact
+filenames below and the audio engine will use them instead. Anything missing
+silently falls back to the procedural version.
+
+Recommended format: .ogg (loops cleanest in browsers). .mp3 also works.
+For looping channels (wind/leaves/music), make sure the file loops seamlessly.
+
+CHANNELS
+--------
+
+ambient_wind.ogg
+    Long looping wind layer. Mid/low band, gusty.
+    Length: 30–90 seconds.
+    What it does in-engine: base ambience, gets louder as you walk faster.
+
+ambient_leaves.ogg
+    Higher, brighter rustle / leaves layer. Loops with wind.
+    Length: 20–60 seconds.
+
+music_drone.ogg
+    The foundation tone. Always playing once started. Should be a low,
+    sustained pad / drone in A (suggested A2 / 110 Hz). No melody.
+    Length: 60+ seconds, seamless loop.
+
+music_bed_low.ogg
+    Mid-range pad layer. Fades in as the player walks deeper into the world
+    (drives the "progress" channel). Suggest a fifth (E) above the drone.
+    Length: 60+ seconds, seamless loop.
+
+music_bed_mid.ogg
+    Movement layer — fades in when the player is moving. Should feel like
+    energy/motion (warmer pad, soft strings). A major triad works.
+    Length: 60+ seconds, seamless loop.
+
+music_bed_high.ogg
+    Shimmer layer that only enters when the player is BOTH moving and
+    deep into the journey. Bright, airy (high pad, bells, choir). The
+    "emotional payoff" timbre.
+    Length: 60+ seconds, seamless loop.
+
+music_swell.ogg
+    One-shot. Plays exactly once when the player arrives at the lone tree.
+    Should feel like resolution / homecoming. ~10 seconds with a long tail.
+
+footstep_grass.ogg
+    A single short footstep on grass. Engine pitch-shifts and re-triggers
+    automatically; provide one clean sample.
+    Length: 0.2–0.4 seconds.
+
+bird_chirp.ogg
+    A single bird call. Engine triggers occasionally with random pitch.
+    Length: 0.3–1.5 seconds.
+
+
+HOW THE ADAPTIVE MIX WORKS
+--------------------------
+
+  speed   ─►  wind volume, bedMid volume, bedHigh volume, melody trigger rate
+  progress ─► bedLow volume, bedHigh volume, fewer melody notes (more focused)
+  arrival ─► music_swell fires once, particle burst from the tree
+
+That means: standing still = quiet drone + wind. Walking = full bed builds.
+Approaching the tree = high shimmer joins. Arriving = swell + payoff.
+
+To swap in real audio: just save the .ogg files into this folder.
