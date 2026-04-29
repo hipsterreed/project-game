@@ -46,6 +46,12 @@ export class ResonanceSystem {
     this.sharedLight.position.set(0, 100, 0);
     scene.add(this.sharedLight);
 
+    // ---- restoration ripple state ----
+    // When the player presses E at the shrine, a wave expands outward
+    // from this center, forcing each ruin/wind-stone within its band
+    // to peak awakening as the wave passes through it.
+    this.ripple = null;
+
     const clusters = world.ruins?.userData?.clusters ?? [];
     for (const cluster of clusters) {
       const meta = this._setupCluster(cluster);
@@ -122,6 +128,25 @@ export class ResonanceSystem {
     };
   }
 
+  triggerRipple(center, opts = {}) {
+    this.ripple = {
+      cx: center.x, cy: center.y, cz: center.z,
+      speed: opts.speed ?? 36,
+      maxRadius: opts.maxRadius ?? 200,
+      bandHalf: opts.bandHalf ?? 6,
+      radius: 0,
+      done: false,
+      onComplete: opts.onComplete,
+      onCompleteFiredOnce: false,
+    };
+    // reset per-visit chime latch on every ruin so they can ring again
+    for (const r of this.ruins) {
+      r.hasChimedThisVisit = false;
+      // also clear any awakening so the ripple drives the light up
+      r.awakening = Math.max(r.awakening, 0.0);
+    }
+  }
+
   update(dt, t) {
     const playerPos = this.player.position;
     // Squared cull distance: anything beyond this AND already
@@ -132,6 +157,19 @@ export class ResonanceSystem {
     // light at it each frame.
     let bestRuin = null;
     let bestA = 0;
+
+    // ---- advance the restoration ripple, if any ----
+    let ripple = this.ripple;
+    if (ripple && !ripple.done) {
+      ripple.radius += ripple.speed * dt;
+      if (ripple.radius >= ripple.maxRadius) {
+        ripple.done = true;
+        if (!ripple.onCompleteFiredOnce) {
+          ripple.onCompleteFiredOnce = true;
+          ripple.onComplete?.();
+        }
+      }
+    }
 
     for (const ruin of this.ruins) {
       const dx = playerPos.x - ruin.worldPos.x;
@@ -153,7 +191,23 @@ export class ResonanceSystem {
 
       const d = Math.sqrt(d2);
       const u = THREE.MathUtils.clamp(1 - d / RANGE, 0, 1);
-      ruin.targetAwakening = u * u * (3 - 2 * u);
+      let targetA = u * u * (3 - 2 * u);
+
+      // ---- restoration ripple override ----
+      // If the ripple band passes through this ruin right now, drive
+      // its target to 1 so it lights up like a stadium wave.
+      if (ripple) {
+        const rdx = ruin.worldPos.x - ripple.cx;
+        const rdz = ruin.worldPos.z - ripple.cz;
+        const rd = Math.hypot(rdx, rdz);
+        const inBand = Math.abs(rd - ripple.radius) < ripple.bandHalf;
+        const passed = rd < ripple.radius;
+        if (inBand) targetA = 1.0;
+        // once passed, hold the awakening at a strong baseline so the
+        // world stays lit after the wave moves on
+        else if (passed) targetA = Math.max(targetA, 0.55);
+      }
+      ruin.targetAwakening = targetA;
 
       // asymmetric lerp: rises faster, fades slower
       const speed = ruin.targetAwakening > ruin.awakening ? 1.6 : 0.45;
@@ -303,15 +357,13 @@ export class ResonanceSystem {
     const pz = ruin.worldPos.z;
     TMP_V.set(px, py, pz);
 
-    // Destination: the spire at the top of the tower, with a small
-    // random ring around it so the stream looks like a halo rather
-    // than a single point.
-    const towerBaseY = this.world.archTrigger?.y ?? 0;
-    const totalH = this.world.towerInfo?.totalHeight ?? 80;
+    // Destination: high up in the sunrise direction (toward The Last
+    // Light). With the tower removed, motes lift up toward the sky
+    // instead — visually the same intent (ascending light).
     const ang = Math.random() * Math.PI * 2;
     const r = 0.6 + Math.random() * 1.6;
     const dstX = this.towerPos.x + Math.cos(ang) * r;
-    const dstY = towerBaseY + totalH + 2.5 + Math.random() * 3.5;
+    const dstY = this.towerPos.y + Math.random() * 8;
     const dstZ = this.towerPos.z + Math.sin(ang) * r;
     TMP_DIR.set(dstX, dstY, dstZ);
 

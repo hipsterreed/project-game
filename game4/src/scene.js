@@ -2,53 +2,111 @@ import * as THREE from "three";
 import { LightProbeGenerator } from "three/addons/lights/LightProbeGenerator.js";
 import { SkyShader } from "./shaders.js";
 import { buildVox } from "./vox.js";
+import { buildShrine } from "./shrine.js";
+import { buildClouds, updateClouds } from "./clouds.js";
+import { buildCliffs, updateCliffs } from "./cliffs.js";
+import { buildBirds, updateBirds } from "./birds.js";
 
 /* -----------------------------------------------------------
- * World layout
- *   The terrain is centred at origin. The mysterious tower is
- *   far north on the Z axis. Player spawns at origin facing -Z.
- *   Smaller ruins (broken pillars, stones) line the route as
- *   wordless waypoints toward the tower.
+ * World layout — Act One: The Quiet Cliffs
+ *   A floating island above a sea of clouds at sunrise. The
+ *   player wakes near a dormant lantern shrine at the island
+ *   centre. Broken paths, ruins, windmills, and bridges lead
+ *   toward a cliff edge that overlooks The Last Light.
  * --------------------------------------------------------- */
 
-export const ARCH_POSITION = new THREE.Vector3(0, 0, -340);  // tower position (kept name for compat)
-export const TOWER_POSITION = ARCH_POSITION;
-export const SPAWN_POSITION = new THREE.Vector3(0, 0, -200);
+// kept exports (used by main.js / resonance.js) — repurposed:
+//   SHRINE_POSITION = where the dormant lantern shrine sits (island centre)
+//   SPAWN_POSITION  = where the player wakes (next to the shrine)
+//   CLIFF_EDGE      = the dramatic cliff vantage (final shot)
+export const SHRINE_POSITION = new THREE.Vector3(0, 0, 0);
+export const SPAWN_POSITION = new THREE.Vector3(2.4, 0, 4.0);
+export const CLIFF_EDGE = new THREE.Vector3(0, 0, -98);
+// legacy names kept so existing imports still resolve
+export const TOWER_POSITION = SHRINE_POSITION;
+export const ARCH_POSITION = SHRINE_POSITION;
 
-const SUN_DIR = new THREE.Vector3(0.42, 0.16, -0.9).normalize();
+// sunrise: low golden sun coming from the cliff direction so the
+// player sees the world rim-lit and silhouetted from sunrise side.
+const SUN_DIR = new THREE.Vector3(0.18, 0.12, -0.96).normalize();
 
-/* Heightmap: a sum of broad sine dunes plus medium ridges plus
- * small surface waves. Pure analytical so we can sample at any
- * (x, z) for player + particle queries without texture reads. */
+// island geometry constants
+const ISLAND_R = 110;        // rolling plateau radius (m)
+const CLIFF_R  = 138;        // cliff falloff radius (m) — beyond is void
+const VOID_Y   = -260;       // depth of the abyss below the cliff edge
+const ISLAND_BASE = 0;       // baseline plateau height
+
+/* Heightmap — floating island.
+ * Plateau within ISLAND_R, steep cliff to CLIFF_R, then plunges to
+ * VOID_Y. Subtle rolling dunes + a small bowl by the shrine + a path
+ * groove to the cliff edge. Two satellite islands give scale. */
 export function getTerrainHeight(x, z) {
-  // broad north-south rolling dunes
-  const broad =
-    Math.sin(x * 0.018 + Math.cos(z * 0.011) * 1.4) * 6.5 +
-    Math.sin(z * 0.022 + 0.8) * 5.5;
-  // medium dune ridges (oriented roughly east-west, the wind line)
-  const medium =
-    Math.sin(x * 0.06 + 1.3) * 1.6 +
-    Math.sin(z * 0.045 + Math.sin(x * 0.03) * 2.0) * 2.4;
-  // small wind ripples
-  const small =
-    Math.sin(x * 0.32 + z * 0.15) * 0.18 +
-    Math.sin(x * 0.55 - z * 0.21) * 0.12;
-  // a gentle bowl near spawn so the player has a calm starting basin
-  const sdx = x - SPAWN_POSITION.x;
-  const sdz = z - SPAWN_POSITION.z;
-  const sdist2 = sdx * sdx + sdz * sdz;
-  const bowl = -Math.exp(-sdist2 / (60 * 60)) * 4.0;
-  // a rising plateau toward the tower (negative Z), so the destination
-  // feels uphill / earned
-  const towardArch = THREE.MathUtils.smoothstep(-z, -20, 320) * 6.0;
+  // ---- main island: distance from origin ----
+  const r = Math.hypot(x, z);
 
-  // a small flat plaza around the tower so the steps & base land cleanly
-  const dx = x - TOWER_POSITION.x;
-  const dz = z - TOWER_POSITION.z;
-  const plazaR2 = dx * dx + dz * dz;
-  const plaza = Math.exp(-plazaR2 / (30 * 30)) * 1.2;
+  // rolling-grass undulation across the plateau (gentler than dunes)
+  const undulate =
+    Math.sin(x * 0.045) * 1.3 +
+    Math.cos(z * 0.04 + 0.7) * 1.1 +
+    Math.sin((x + z) * 0.085) * 0.4;
+  // a tiny micro-ripple so the cloak/light pickup has surface variation
+  const micro = Math.sin(x * 0.32 + z * 0.21) * 0.08;
 
-  return broad + medium + small + bowl + towardArch + plaza;
+  // a small bowl near the shrine — calm starting basin
+  const sdx = x - SHRINE_POSITION.x;
+  const sdz = z - SHRINE_POSITION.z;
+  const sBowl = -Math.exp(-(sdx * sdx + sdz * sdz) / (12 * 12)) * 1.4;
+
+  // a soft rising rim around the cliff edge (so the cliff "lifts" the eye
+  // before falling away — reads as a windswept ridge)
+  const rimPlateau = THREE.MathUtils.smoothstep(r, ISLAND_R - 30, ISLAND_R - 4) * 2.5;
+
+  // path groove: a faint depression along z<0 leading to the cliff edge
+  const pathGroove = -Math.exp(-(sdx * sdx) / (6 * 6))
+                   * THREE.MathUtils.clamp(-z / 90, 0, 1) * 0.7;
+
+  let mainH = ISLAND_BASE + undulate + micro + sBowl + rimPlateau + pathGroove;
+
+  // ---- cliff falloff ----
+  // smooth drop from ISLAND_R to CLIFF_R, then plummet to VOID_Y
+  if (r > ISLAND_R) {
+    const t = THREE.MathUtils.clamp((r - ISLAND_R) / (CLIFF_R - ISLAND_R), 0, 1);
+    // first ~70% of the band: edge ridge breaks downward (cliff face)
+    const cliffDrop = -Math.pow(t, 1.6) * 36.0;
+    mainH = mainH + cliffDrop;
+    if (r > CLIFF_R) {
+      // beyond the cliff: hard plunge into the abyss
+      mainH = VOID_Y - (r - CLIFF_R) * 0.4;
+    }
+  }
+
+  // ---- satellite islands (2 small ones for parallax / scale) ----
+  // Each is a soft disc-falloff pushed up to plateau height. They sit
+  // out past the cliff so they read as nearby floating chunks.
+  const sats = [
+    { x:  175, z: -120, R: 38, h: -8  },  // west of the cliff vantage, lower
+    { x: -210, z:   60, R: 48, h: -14 },  // behind/east, deeper
+  ];
+  let satH = -Infinity;
+  for (const s of sats) {
+    const dx = x - s.x;
+    const dz = z - s.z;
+    const dr = Math.hypot(dx, dz);
+    if (dr < s.R + 18) {
+      const top = s.h + Math.sin(dx * 0.06) * 0.6 + Math.cos(dz * 0.05) * 0.5;
+      // soft disc falloff
+      const tt = THREE.MathUtils.clamp((dr - s.R) / 18, 0, 1);
+      const drop = -Math.pow(tt, 1.5) * 28.0;
+      const candH = (dr < s.R) ? top : top + drop;
+      if (dr < s.R + 18 && candH > satH) satH = candH;
+    }
+  }
+  if (satH > -Infinity) {
+    // satellites only override when above the void (they're chunks in air)
+    mainH = Math.max(mainH, satH);
+  }
+
+  return mainH;
 }
 
 // kept for compat
@@ -77,8 +135,8 @@ export function buildWorld(scene, renderer) {
   const root = new THREE.Group();
   scene.add(root);
 
-  // ---- sky dome ----
-  const skyGeo = new THREE.SphereGeometry(900, 32, 16);
+  // ---- sky dome (sunrise palette + The Last Light replaces planet 1) ----
+  const skyGeo = new THREE.SphereGeometry(900, 48, 24);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     uniforms: THREE.UniformsUtils.clone(SkyShader.uniforms),
@@ -87,6 +145,22 @@ export function buildWorld(scene, renderer) {
     depthWrite: false,
   });
   skyMat.uniforms.uSunDir.value.copy(SUN_DIR);
+  // sunrise color override: warm coral horizon → peach mid → twilight blue zenith
+  skyMat.uniforms.uHorizon.value.set("#ffc28a");
+  skyMat.uniforms.uMid.value.set("#e8a89c");
+  skyMat.uniforms.uZenith.value.set("#5a6e94");
+  skyMat.uniforms.uSunColor.value.set("#ffe2b0");
+  // The Last Light: replaces planet 1 — a fractured glowing lantern, high
+  // and in the sunrise direction so the player's eye is drawn to it from
+  // the cliff edge. Size starts modest, grows during finale.
+  skyMat.uniforms.uPlanetDir.value.set(0.10, 0.55, -0.83).normalize();
+  skyMat.uniforms.uPlanetSize.value = 0.06;
+  skyMat.uniforms.uPlanetColor.value.set("#fff0b8");
+  skyMat.uniforms.uPlanetShade.value.set("#3a2a14");
+  skyMat.uniforms.uPlanetRing.value = 1.32;            // cracked broken-ring halo
+  skyMat.uniforms.uPlanetRingColor.value.set("#ffd28a");
+  // hide the second planet (was a tiny moon — distracting at sunrise)
+  skyMat.uniforms.uPlanet2Size.value = 0.0;
   const sky = new THREE.Mesh(skyGeo, skyMat);
   sky.renderOrder = -1;
   root.add(sky);
@@ -107,7 +181,9 @@ export function buildWorld(scene, renderer) {
     probeScene.add(probeSky);
     const groundDisc = new THREE.Mesh(
       new THREE.CircleGeometry(800, 24),
-      new THREE.MeshBasicMaterial({ color: 0xc8a06a, side: THREE.DoubleSide }),
+      // warm sunrise grass-stone bounce so the SH probe picks up a
+      // ground tint that matches the new island palette
+      new THREE.MeshBasicMaterial({ color: 0x8a7050, side: THREE.DoubleSide }),
     );
     groundDisc.rotation.x = -Math.PI / 2;
     groundDisc.position.y = -2;
@@ -142,10 +218,9 @@ export function buildWorld(scene, renderer) {
     root.add(new THREE.HemisphereLight(0xffe4b8, 0x6b3a18, 0.42));
   }
 
-  // direct sun — softened so the probe-based ambient does most of the
-  // contour work (this is what makes the lightprobes example feel
-  // "lit" rather than "spotlit")
-  const sun = new THREE.DirectionalLight(0xffd28a, 0.95);
+  // direct sun — sunrise: warm coral, low intensity (the SH probe carries
+  // most of the soft ambient contour work; sun is for crisp rim/cast).
+  const sun = new THREE.DirectionalLight(0xffc090, 0.85);
   sun.position.copy(SUN_DIR).multiplyScalar(120);
   sun.target.position.set(0, 0, 0);
   sun.castShadow = true;
@@ -196,97 +271,77 @@ export function buildWorld(scene, renderer) {
   footprintLayer.mesh.position.copy(terrain.position);
   root.add(footprintLayer.mesh);
 
-  // ---- distant mountain ring ----
-  // Big silhouettes far past the fog, with their own atmospheric tint
-  // baked into vertex colors (fog disabled on the material so they
-  // don't dissolve at this distance).
+  // ---- distant floating-island silhouettes ----
+  // The mountain-ring code is reused as a backdrop of distant landmasses
+  // hanging in the sunrise haze beyond the cliff. (Recolored for sunrise
+  // in buildDistantMountains itself.)
   root.add(buildDistantMountains());
 
-  // ---- destination: tower ----
-  const towerY = getTerrainHeight(TOWER_POSITION.x, TOWER_POSITION.z);
-  const towerBuild = buildTower();
-  const tower = towerBuild.group;
-  tower.position.copy(TOWER_POSITION);
-  tower.position.y = towerY;
-  root.add(tower);
-
-  // step colliders (world space)
-  const stairColliders = towerBuild.steps.map((s) => ({
-    x: TOWER_POSITION.x + s.x,
-    z: TOWER_POSITION.z + s.z,
-    y: towerY + s.y,
-    halfW: s.halfW,
-    halfD: s.halfD,
-    cos: s.cos,
-    sin: s.sin,
-  }));
-
-  // a giant base cylinder collider (so the player can't walk through the tower)
-  const TOWER_BASE_RADIUS = towerBuild.baseRadius;
-  const TOWER_TOP_TRIGGER_Y = towerY + towerBuild.totalHeight - 4.0;
-
-  // ---- waypoints: ancient pillars ----
+  // ---- ruins (broken pillars / arches / windstones) ----
   const ruins = buildRuins();
   root.add(ruins);
 
-  // ---- spawn lamp ----
-  const lamp = buildLamp();
-  const lampX = SPAWN_POSITION.x + 4.0, lampZ = SPAWN_POSITION.z - 2.0;
-  lamp.position.set(lampX, getTerrainHeight(lampX, lampZ), lampZ);
-  root.add(lamp);
+  // ---- dormant lantern shrine (player wakes here) ----
+  const shrine = buildShrine();
+  const shrY = getTerrainHeight(SHRINE_POSITION.x, SHRINE_POSITION.z);
+  shrine.group.position.set(SHRINE_POSITION.x, shrY, SHRINE_POSITION.z);
+  root.add(shrine.group);
 
-  // ---- distant silhouette range ----
+  // ---- cliff props: windmills, bridges, banners, fragments, wind stones ----
+  const cliffs = buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R });
+  root.add(cliffs.group);
+
+  // wind stones share the resonance contract (stoneMaterial / engravings
+  // / pillarTopY userData) — append them to the ruin clusters list so the
+  // ResonanceSystem activates them when the player passes near.
+  const ruinClusterList = ruins.userData.clusters;
+  for (const ws of cliffs.windstones) {
+    ws.group.userData._isWindStone = true;
+    ruinClusterList.push(ws.group);
+  }
+
+  // ---- birds circling overhead ----
+  const birds = buildBirds();
+  root.add(birds.group);
+
+  // ---- cloud sea below the island + drifting cloud puffs ----
+  const clouds = buildClouds();
+  root.add(clouds.group);
+
+  // ---- distant silhouette range (kept; reads as far cliff face) ----
   const range = buildDistantRange();
   root.add(range);
 
-  // ---- hidden trigger sphere at tower foot ----
-  const archTrigger = new THREE.Vector3().copy(TOWER_POSITION);
-  archTrigger.y = towerY;
+  // colliders contributed by cliff props (bridge planks act like stairs)
+  const stairColliders = cliffs.colliders || [];
 
-  /* World height query that includes stair colliders. The player
-   * uses this for ground collision so they can walk up the spiral
-   * stairs. fromY caps which steps are eligible (you can't snap up
-   * onto a step that's far above your head). */
+  /* World height query that includes prop colliders (e.g. bridge planks,
+   * later: wind-bridge stepping pads). fromY caps which colliders are
+   * eligible (you can't snap up onto a plank far above your head). */
   function surfaceY(x, z, fromY) {
     let y = getTerrainHeight(x, z);
     if (fromY === undefined) return y;
 
-    // fast cull: if not near tower, skip stair check entirely
-    const dx = x - TOWER_POSITION.x;
-    const dz = z - TOWER_POSITION.z;
-    const r2 = dx * dx + dz * dz;
-    if (r2 > 40 * 40) return y;
-
     for (let i = 0; i < stairColliders.length; i++) {
       const s = stairColliders[i];
-      // step is small; only test if close in xz
       const ddx = x - s.x;
       const ddz = z - s.z;
       if (ddx * ddx + ddz * ddz > 12) continue;
-      // rotate into step local frame
       const lx = ddx * s.cos + ddz * s.sin;
       const lz = -ddx * s.sin + ddz * s.cos;
       if (Math.abs(lx) > s.halfW) continue;
       if (Math.abs(lz) > s.halfD) continue;
-      // accept if step is within natural step-up reach (so the player
-      // can walk up the spiral) or below the player (so they land on
-      // it from above).
       if (s.y > fromY + 0.9) continue;
       if (s.y > y) y = s.y;
     }
     return y;
   }
 
-  /* Returns true if (x, z) at height y hits the tower body. The tower
-   * is a tapered stack so the blocking radius shrinks with altitude. */
-  function blocksColumn(x, z, y) {
-    const dx = x - TOWER_POSITION.x;
-    const dz = z - TOWER_POSITION.z;
-    const r2 = dx * dx + dz * dz;
-    const yLocal = (y === undefined ? 0 : y - towerY);
-    if (yLocal > towerBuild.totalHeight + 4) return false;
-    const r = towerBuild.radiusAt(Math.max(0, yLocal));
-    return r2 < r * r;
+  /* Column blocker — kept as no-op for now (no big static obstacle on the
+   * island). Cliff props are small enough that terrain falloff handles them.
+   */
+  function blocksColumn(/* x, z, y */) {
+    return false;
   }
 
   const world = {
@@ -297,14 +352,12 @@ export function buildWorld(scene, renderer) {
     sandMat,
     sun,
     sunDir: SUN_DIR.clone(),
-    arch: tower,        // kept name for code that referenced "arch"
-    tower,
-    towerInfo: towerBuild,
     ruins,
-    lamp,
-    archTrigger,
-    towerTopY: TOWER_TOP_TRIGGER_Y,
-    towerBaseRadius: TOWER_BASE_RADIUS,
+    shrine,
+    cliffs,
+    birds,
+    clouds,
+    archTrigger: SHRINE_POSITION.clone(),  // legacy alias for resonance
     footprintLayer,
     stairColliders,
     getHeight: getTerrainHeight,
@@ -313,16 +366,17 @@ export function buildWorld(scene, renderer) {
     blocksColumn,
     getNormal,
     getSlope,
-    unlockTowerStairs() {
-      towerBuild.unlockUpperStairs(stairColliders, TOWER_POSITION);
-    },
+    // island geometry constants (read by gameplay code)
+    ISLAND_R,
+    CLIFF_R,
+    SHRINE_POSITION: SHRINE_POSITION.clone(),
+    CLIFF_EDGE: CLIFF_EDGE.clone(),
   };
 
-  // Haze: a warm-tan-meets-teal so the dunes blend into the cooler
-  // sky band overhead without losing their golden footing near the
-  // horizon. Same color used for fog and the sand-shader uHaze.
-  scene.background = new THREE.Color("#cfd9c2");
-  scene.fog = new THREE.Fog(0xcfd9c2, 80, 360);
+  // Sunrise haze: warm coral horizon glow blending up into a cooler band.
+  // Same color used for fog and the sand-shader uHaze.
+  scene.background = new THREE.Color("#f4c8a6");
+  scene.fog = new THREE.Fog(0xf4c8a6, 90, 420);
 
   // ---- voxel props (MagicaVoxel) ----
   // Loaded asynchronously; missing files are skipped gracefully so the
@@ -339,20 +393,23 @@ export function buildWorld(scene, renderer) {
  * --------------------------------------------------------- */
 function makeSandMaterial() {
   const mat = new THREE.MeshStandardMaterial({
-    color: 0xe8c98a,
+    color: 0xb8a472,
     roughness: 0.97,
     metalness: 0.0,
   });
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime      = { value: 0 };
-    shader.uniforms.uHaze      = { value: new THREE.Color("#cfd9c2") };
-    shader.uniforms.uColorLow  = { value: new THREE.Color("#cca678") };
-    shader.uniforms.uColorMid  = { value: new THREE.Color("#e6c693") };
-    shader.uniforms.uColorHigh = { value: new THREE.Color("#f5dfae") };
-    shader.uniforms.uShadow    = { value: new THREE.Color("#5b3a20") };
-    shader.uniforms.uFogNear   = { value: 60.0 };
-    shader.uniforms.uFogFar    = { value: 380.0 };
+    // sunrise haze tint (warm coral) — ground melts into horizon glow
+    shader.uniforms.uHaze      = { value: new THREE.Color("#f4c8a6") };
+    // ground palette: dirt/stone base under sunrise light, with grass-tone
+    // mid and warmer crests (the player sees rolling grass-and-stone)
+    shader.uniforms.uColorLow  = { value: new THREE.Color("#7a6a48") };  // shaded dirt
+    shader.uniforms.uColorMid  = { value: new THREE.Color("#7a8c4a") };  // grass mid
+    shader.uniforms.uColorHigh = { value: new THREE.Color("#c8b876") };  // sunlit grass tips
+    shader.uniforms.uShadow    = { value: new THREE.Color("#3a2a18") };  // exposed rock
+    shader.uniforms.uFogNear   = { value: 90.0 };
+    shader.uniforms.uFogFar    = { value: 420.0 };
 
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -780,11 +837,13 @@ function buildDistantMountains() {
   group.add(buildRidge({
     radius: 1020,
     segs: 720,
-    baseY: -14,
-    peakLow: 140,
-    peakHigh: 320,
-    baseColor: "#9c8898",
-    peakColor: "#e3d5c4",
+    baseY: -180,
+    peakLow: 80,
+    peakHigh: 220,
+    // sunrise: pale warm horizon — these are distant floating-island
+    // silhouettes melting into the cloud-sea haze
+    baseColor: "#b29498",
+    peakColor: "#ffd9b0",
     radialJitter: 0.04,
     octaves: [
       { freq: 1.2,  amp: 0.55 },
@@ -801,11 +860,11 @@ function buildDistantMountains() {
   group.add(buildRidge({
     radius: 760,
     segs: 600,
-    baseY: -8,
-    peakLow: 90,
-    peakHigh: 220,
-    baseColor: "#7e6a72",
-    peakColor: "#cdb89c",
+    baseY: -160,
+    peakLow: 50,
+    peakHigh: 150,
+    baseColor: "#8a6878",
+    peakColor: "#e6b890",
     radialJitter: 0.05,
     octaves: [
       { freq: 1.4,  amp: 0.55 },
@@ -822,11 +881,11 @@ function buildDistantMountains() {
   group.add(buildRidge({
     radius: 540,
     segs: 520,
-    baseY: -6,
-    peakLow: 36,
-    peakHigh: 110,
-    baseColor: "#5e4a40",
-    peakColor: "#a5856a",
+    baseY: -140,
+    peakLow: 24,
+    peakHigh: 80,
+    baseColor: "#5a3e3c",
+    peakColor: "#d99868",
     radialJitter: 0.07,
     octaves: [
       { freq: 2.1,  amp: 0.50 },
@@ -842,495 +901,6 @@ function buildDistantMountains() {
   return group;
 }
 
-/* -----------------------------------------------------------
- * Tower: a tall, stepped sun-temple silhouette with a spiraling
- * external staircase. The middle section of the stair is missing
- * until the player solves a small puzzle at the base — three
- * glyph plates that must each be activated. Returns:
- *   - group, steps[], baseRadius, totalHeight, accentMeshes,
- *     spire/core/glow (animation hooks), radiusAt(y),
- *   - plates[]: puzzle glyph plates (local pos, mesh, light, lit)
- *   - unlockUpperStairs(stairColliders, towerPos): reveals the
- *     missing middle section and adds its colliders.
- * --------------------------------------------------------- */
-function buildTower() {
-  const g = new THREE.Group();
-
-  // ---- materials ----
-  const stoneMat = new THREE.MeshStandardMaterial({
-    color: 0x9d7148, roughness: 0.92, metalness: 0.0,
-  });
-  const accentStoneMat = new THREE.MeshStandardMaterial({
-    color: 0x4a2a18, roughness: 0.85, metalness: 0.05,
-  });
-  const stepMat = new THREE.MeshStandardMaterial({
-    color: 0x8a5d3a, roughness: 0.95, metalness: 0.0,
-  });
-
-  // ---- stepped square tiers (sun-temple silhouette) — 5 tiers, taller ----
-  // hw = half-width (tier is a square of side 2*hw).
-  const tiers = [
-    { hw: 8.0, h: 24, yBase: 0,   bandColor: 0x6cbcc8 },
-    { hw: 6.6, h: 22, yBase: 24,  bandColor: 0x8edae0 },
-    { hw: 5.4, h: 22, yBase: 46,  bandColor: 0xb8e6e8 },
-    { hw: 4.2, h: 20, yBase: 68,  bandColor: 0xcfeef0 },
-    { hw: 3.0, h: 16, yBase: 88,  bandColor: 0xe0f4f6 },
-  ];
-  // collision radius (inscribed circle of the base — the player can
-  // walk into the corner pockets, which feels right for a square temple)
-  const baseRadius = tiers[0].hw * 0.95;
-  const totalHeight = tiers[tiers.length - 1].yBase + tiers[tiers.length - 1].h;
-
-  const accentMeshes = [];
-
-  for (let t = 0; t < tiers.length; t++) {
-    const tier = tiers[t];
-
-    // shaft: solid square block
-    const shaftGeo = new THREE.BoxGeometry(tier.hw * 2, tier.h, tier.hw * 2);
-    const shaft = new THREE.Mesh(shaftGeo, stoneMat);
-    shaft.position.y = tier.yBase + tier.h * 0.5;
-    shaft.castShadow = true;
-    shaft.receiveShadow = true;
-    g.add(shaft);
-
-    // cap slab on top — slightly wider, like temple lintel stones
-    const capH = 0.9;
-    const capW = tier.hw * 2 + 0.7;
-    const cap = new THREE.Mesh(new THREE.BoxGeometry(capW, capH, capW), stoneMat);
-    cap.position.y = tier.yBase + tier.h - capH * 0.5;
-    cap.castShadow = true;
-    cap.receiveShadow = true;
-    g.add(cap);
-
-    // dark inset frieze band just under the cap
-    const bandH = 0.55;
-    const bandW = tier.hw * 2 + 0.25;
-    const band = new THREE.Mesh(
-      new THREE.BoxGeometry(bandW, bandH, bandW),
-      accentStoneMat,
-    );
-    band.position.y = tier.yBase + tier.h - capH - bandH * 0.5;
-    band.castShadow = true;
-    band.receiveShadow = true;
-    g.add(band);
-
-    // glyphs on the frieze: 2 per face, glow band color
-    for (let f = 0; f < 4; f++) {
-      const ang = f * (Math.PI / 2);
-      const nx = Math.cos(ang);
-      const nz = Math.sin(ang);
-      // outward normal direction; tangent for placing two glyphs per face
-      const tx = -nz, tz = nx;
-      for (let k = -1; k <= 1; k += 2) {
-        const offset = k * tier.hw * 0.45;
-        const gx = nx * (tier.hw + 0.06) + tx * offset;
-        const gz = nz * (tier.hw + 0.06) + tz * offset;
-        const glyph = new THREE.Mesh(
-          new THREE.PlaneGeometry(0.5, 0.65),
-          new THREE.MeshBasicMaterial({
-            color: tier.bandColor,
-            transparent: true,
-            opacity: 0.7,
-            side: THREE.DoubleSide,
-          }),
-        );
-        glyph.position.set(gx, tier.yBase + tier.h - capH - bandH * 0.5, gz);
-        glyph.lookAt(gx + nx, glyph.position.y, gz + nz);
-        g.add(glyph);
-        accentMeshes.push({ mesh: glyph, mat: glyph.material, baseColor: tier.bandColor });
-      }
-    }
-  }
-
-  // ---- stepped pyramid finial above the top tier ----
-  let finialY = totalHeight;
-  for (let i = 0; i < 3; i++) {
-    const w = 2.6 - i * 0.7;
-    const h = 0.7;
-    const slab = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), stoneMat);
-    slab.position.y = finialY + h * 0.5;
-    slab.castShadow = true;
-    slab.receiveShadow = true;
-    g.add(slab);
-    finialY += h;
-  }
-
-  // crowning spire (elongated diamond)
-  const spireGeo = new THREE.OctahedronGeometry(2.0, 0);
-  spireGeo.scale(0.6, 2.2, 0.6);
-  const spireMat = new THREE.MeshStandardMaterial({
-    color: 0xe0f4f6,
-    roughness: 0.4,
-    metalness: 0.2,
-    emissive: 0x2a6a78,
-    emissiveIntensity: 0.6,
-  });
-  const spire = new THREE.Mesh(spireGeo, spireMat);
-  spire.position.y = finialY + 1.8;
-  spire.castShadow = true;
-  g.add(spire);
-
-  const core = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.85, 1),
-    new THREE.MeshBasicMaterial({ color: 0xffe4b8 }),
-  );
-  core.position.y = spire.position.y;
-  g.add(core);
-
-  const glow = new THREE.PointLight(0xa0e4ec, 8.0, 90, 1.6);
-  glow.position.y = spire.position.y;
-  g.add(glow);
-
-  // ---- spiral staircase wrapping the square tower ----
-  // Spiral radius at height y = tier corner-distance + gap, so the
-  // spiral hugs the silhouette as it tapers.
-  function towerHalfWidthAt(y) {
-    if (y <= 0) return tiers[0].hw;
-    for (let k = 0; k < tiers.length; k++) {
-      const tk = tiers[k];
-      if (y >= tk.yBase && y < tk.yBase + tk.h) return tk.hw;
-    }
-    return tiers[tiers.length - 1].hw * 0.6;
-  }
-  const STEP_GAP = 1.0;
-  function spiralRadiusAt(y) {
-    return towerHalfWidthAt(y) * Math.SQRT2 + STEP_GAP;
-  }
-
-  const steps = [];
-  const stepGeo = new THREE.BoxGeometry(2.2, 0.28, 1.55);
-  const STEP_COUNT = 150;                                  // taller tower → more steps
-  const STEP_RISE = (totalHeight - 8) / STEP_COUNT;        // ≈ 0.65 m / step
-  const STEP_ANGLE_PER = 0.115;                            // ≈ 6.6° / step
-
-  // The puzzle gap: a missing middle section. Until the puzzle is
-  // solved these steps are invisible AND have no collider, so the
-  // player physically can't continue past it.
-  const PUZZLE_GAP_START = 60;
-  const PUZZLE_GAP_END   = 78;
-
-  const skipPattern = (i) => {
-    if (i < 4) return false;
-    if (i % 11 === 0) return true;
-    if (i % 17 === 0) return true;
-    return false;
-  };
-  const isPuzzleStep = (i) => i >= PUZZLE_GAP_START && i < PUZZLE_GAP_END;
-
-  const _kept = [];
-  for (let i = 0; i < STEP_COUNT; i++) {
-    if (skipPattern(i)) continue;
-    _kept.push(i);
-  }
-
-  const stepMesh = new THREE.InstancedMesh(stepGeo, stepMat, _kept.length);
-  stepMesh.castShadow = false;
-  stepMesh.receiveShadow = true;
-
-  const _stepMat = new THREE.Matrix4();
-  const _stepQ = new THREE.Quaternion();
-  const _stepP = new THREE.Vector3();
-  const _stepS = new THREE.Vector3(1, 1, 1);
-  const _hideS = new THREE.Vector3(0.0001, 0.0001, 0.0001);
-  const Y_AXIS = new THREE.Vector3(0, 1, 0);
-
-  // glow strips
-  const stripGeo = new THREE.BoxGeometry(2.05, 0.04, 0.04);
-  const stripMat = new THREE.MeshBasicMaterial({
-    color: 0x9be0e8, transparent: true, opacity: 0.8,
-  });
-  const stripCount = Math.ceil(_kept.length / 3);
-  const stripMesh = new THREE.InstancedMesh(stripGeo, stripMat, stripCount);
-  let stripIdx = 0;
-
-  // stash per-instance info so we can re-enable puzzle steps later
-  const stepInfo = [];   // [{ instanceIdx, srcIdx, x, y, z, yawY, isPuzzle, stripIdx? }]
-
-  for (let n = 0; n < _kept.length; n++) {
-    const i = _kept[n];
-    const ang = i * STEP_ANGLE_PER;
-    const y = i * STEP_RISE + 0.5;
-    const rT = spiralRadiusAt(y);
-    const x = Math.cos(ang) * rT;
-    const z = Math.sin(ang) * rT;
-    const yawY = -ang + Math.PI / 2;
-    const puzzle = isPuzzleStep(i);
-
-    _stepP.set(x, y, z);
-    _stepQ.setFromAxisAngle(Y_AXIS, yawY);
-    _stepMat.compose(_stepP, _stepQ, puzzle ? _hideS : _stepS);
-    stepMesh.setMatrixAt(n, _stepMat);
-
-    if (!puzzle) {
-      steps.push({
-        x, z,
-        y: y + 0.14,
-        halfW: 1.1,
-        halfD: 0.78,
-        cos: Math.cos(yawY),
-        sin: Math.sin(yawY),
-      });
-    }
-
-    let myStrip = -1;
-    if (i % 3 === 0) {
-      const sx = x + Math.cos(ang) * 0.65;
-      const sz = z + Math.sin(ang) * 0.65;
-      _stepP.set(sx, y + 0.16, sz);
-      _stepMat.compose(_stepP, _stepQ, puzzle ? _hideS : _stepS);
-      stripMesh.setMatrixAt(stripIdx, _stepMat);
-      myStrip = stripIdx;
-      stripIdx++;
-    }
-
-    stepInfo.push({ instanceIdx: n, srcIdx: i, x, y, z, yawY, isPuzzle: puzzle, stripIdx: myStrip });
-  }
-  for (let k = stripIdx; k < stripCount; k++) {
-    _stepP.set(0, -10000, 0);
-    _stepMat.compose(_stepP, _stepQ, _stepS);
-    stripMesh.setMatrixAt(k, _stepMat);
-  }
-  stepMesh.instanceMatrix.needsUpdate = true;
-  stripMesh.instanceMatrix.needsUpdate = true;
-  g.add(stepMesh);
-  g.add(stripMesh);
-  accentMeshes.push({ mesh: stripMesh, mat: stripMat, baseColor: 0x9be0e8 });
-
-  // top platform
-  const topY = STEP_COUNT * STEP_RISE + 0.5;
-  const topR = towerHalfWidthAt(topY);
-  const platR = topR * Math.SQRT2 + STEP_GAP + 0.4;
-  const plat = new THREE.Mesh(
-    new THREE.CylinderGeometry(platR, platR, 0.4, 24),
-    stepMat,
-  );
-  plat.position.y = topY;
-  plat.castShadow = false;
-  plat.receiveShadow = true;
-  g.add(plat);
-  steps.push({
-    x: 0, z: 0, y: topY + 0.2,
-    halfW: platR, halfD: platR,
-    cos: 1, sin: 0,
-  });
-
-  // base stones around the foot
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2;
-    const r = baseRadius + 2.0 + Math.random() * 1.6;
-    const sx = Math.cos(a) * r;
-    const sz = Math.sin(a) * r;
-    const stoneGeo = new THREE.BoxGeometry(
-      1.2 + Math.random() * 1.4,
-      0.7 + Math.random() * 0.5,
-      1.2 + Math.random() * 1.4,
-    );
-    const stone = new THREE.Mesh(stoneGeo, stoneMat);
-    stone.position.set(sx, 0.1, sz);
-    stone.rotation.y = Math.random() * Math.PI;
-    stone.castShadow = true;
-    stone.receiveShadow = true;
-    g.add(stone);
-  }
-
-  // ---- 3 puzzle plates around the base ----
-  // Spaced 120° apart. The first one faces the player's approach
-  // direction (+z toward spawn) so it's discoverable; the other
-  // two require walking around the tower.
-  const plates = [];
-  const plateBaseAngle = Math.PI / 2; // +z direction
-  for (let i = 0; i < 3; i++) {
-    const ang = plateBaseAngle + i * (Math.PI * 2 / 3);
-    const r = baseRadius + 4.5;
-    const px = Math.cos(ang) * r;
-    const pz = Math.sin(ang) * r;
-
-    const plateGroup = new THREE.Group();
-    plateGroup.position.set(px, 0, pz);
-    plateGroup.rotation.y = -ang + Math.PI / 2; // glyph faces outward
-
-    const pedestal = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.05, 1.2, 0.45, 18),
-      new THREE.MeshStandardMaterial({ color: 0x6e4e2c, roughness: 0.95 }),
-    );
-    pedestal.position.y = 0.22;
-    pedestal.castShadow = true;
-    pedestal.receiveShadow = true;
-    plateGroup.add(pedestal);
-
-    // glyph disc on top
-    const glyphMat = new THREE.MeshBasicMaterial({
-      color: 0x2a4a4e,
-      transparent: true,
-      opacity: 0.92,
-    });
-    const glyph = new THREE.Mesh(new THREE.CircleGeometry(0.7, 28), glyphMat);
-    glyph.rotation.x = -Math.PI / 2;
-    glyph.position.y = 0.451;
-    plateGroup.add(glyph);
-
-    // small inscribed cross on the glyph (purely decorative)
-    const crossMat = new THREE.MeshBasicMaterial({
-      color: 0x1a2a2e,
-      transparent: true,
-      opacity: 0.6,
-    });
-    const cBar1 = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.06), crossMat);
-    cBar1.rotation.x = -Math.PI / 2;
-    cBar1.position.y = 0.452;
-    plateGroup.add(cBar1);
-    const cBar2 = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 0.9), crossMat);
-    cBar2.rotation.x = -Math.PI / 2;
-    cBar2.position.y = 0.452;
-    plateGroup.add(cBar2);
-
-    // dim point light, brightens when activated
-    const light = new THREE.PointLight(0xa0e4ec, 0, 9, 2);
-    light.position.y = 1.2;
-    plateGroup.add(light);
-
-    g.add(plateGroup);
-
-    plates.push({
-      x: px, z: pz,
-      group: plateGroup,
-      glyphMat,
-      light,
-      lit: false,
-      activatedAt: 0,
-    });
-  }
-
-  // ---- unlock: reveal the puzzle stair section + push colliders ----
-  let upperStairsUnlocked = false;
-  function unlockUpperStairs(stairColliders, towerPos) {
-    if (upperStairsUnlocked) return;
-    upperStairsUnlocked = true;
-
-    for (const info of stepInfo) {
-      if (!info.isPuzzle) continue;
-      _stepP.set(info.x, info.y, info.z);
-      _stepQ.setFromAxisAngle(Y_AXIS, info.yawY);
-      _stepMat.compose(_stepP, _stepQ, _stepS);
-      stepMesh.setMatrixAt(info.instanceIdx, _stepMat);
-
-      if (info.stripIdx >= 0) {
-        const ang = info.srcIdx * STEP_ANGLE_PER;
-        const sx = info.x + Math.cos(ang) * 0.65;
-        const sz = info.z + Math.sin(ang) * 0.65;
-        _stepP.set(sx, info.y + 0.16, sz);
-        _stepMat.compose(_stepP, _stepQ, _stepS);
-        stripMesh.setMatrixAt(info.stripIdx, _stepMat);
-      }
-
-      stairColliders.push({
-        x: towerPos.x + info.x,
-        z: towerPos.z + info.z,
-        y: info.y + 0.14,
-        halfW: 1.1, halfD: 0.78,
-        cos: Math.cos(info.yawY),
-        sin: Math.sin(info.yawY),
-      });
-    }
-    stepMesh.instanceMatrix.needsUpdate = true;
-    stripMesh.instanceMatrix.needsUpdate = true;
-  }
-
-  return {
-    group: g,
-    steps,
-    baseRadius,
-    totalHeight,
-    accentMeshes,
-    spire,
-    spireMat,
-    core,
-    glow,
-    radiusAt: towerHalfWidthAt,
-    plates,
-    unlockUpperStairs,
-    isUnlocked: () => upperStairsUnlocked,
-    puzzleGapY: PUZZLE_GAP_START * STEP_RISE + 0.5,
-  };
-}
-
-/* -----------------------------------------------------------
- * Spawn lamp: a tall hooked pole with a hanging warm orb,
- * placed near the player's spawn. Approach to read lore.
- * --------------------------------------------------------- */
-function buildLamp() {
-  const g = new THREE.Group();
-
-  const stoneMat = new THREE.MeshStandardMaterial({
-    color: 0x6e4a30,
-    roughness: 0.9,
-    metalness: 0.05,
-  });
-
-  // base
-  const baseGeo = new THREE.CylinderGeometry(0.18, 0.24, 0.3, 8);
-  const base = new THREE.Mesh(baseGeo, stoneMat);
-  base.position.y = 0.15;
-  base.castShadow = true;
-  base.receiveShadow = true;
-  g.add(base);
-
-  // pole
-  const poleGeo = new THREE.CylinderGeometry(0.04, 0.05, 2.2, 6);
-  const pole = new THREE.Mesh(poleGeo, stoneMat);
-  pole.position.y = 1.4;
-  pole.castShadow = true;
-  g.add(pole);
-
-  // hook (a quarter torus)
-  const hookGeo = new THREE.TorusGeometry(0.22, 0.025, 6, 12, Math.PI * 0.6);
-  const hook = new THREE.Mesh(hookGeo, stoneMat);
-  hook.rotation.z = Math.PI;
-  hook.position.set(0.22, 2.5, 0);
-  hook.castShadow = true;
-  g.add(hook);
-
-  // chain (small group of slim cylinders)
-  for (let i = 0; i < 3; i++) {
-    const cgeo = new THREE.TorusGeometry(0.04, 0.008, 5, 8);
-    const c = new THREE.Mesh(cgeo, stoneMat);
-    c.position.set(0.42, 2.42 - i * 0.07, 0);
-    c.rotation.x = (i % 2) * Math.PI / 2;
-    g.add(c);
-  }
-
-  // glass body of the lantern
-  const glassGeo = new THREE.OctahedronGeometry(0.16, 0);
-  glassGeo.scale(1, 1.4, 1);
-  const glassMat = new THREE.MeshBasicMaterial({
-    color: 0xffe4b8,
-    transparent: true,
-    opacity: 0.85,
-  });
-  const glass = new THREE.Mesh(glassGeo, glassMat);
-  glass.position.set(0.42, 2.05, 0);
-  g.add(glass);
-
-  // hot core
-  const coreGeo = new THREE.SphereGeometry(0.05, 8, 6);
-  const coreMat = new THREE.MeshBasicMaterial({ color: 0xfff1c4 });
-  const core = new THREE.Mesh(coreGeo, coreMat);
-  core.position.copy(glass.position);
-  g.add(core);
-
-  // warm point light
-  const light = new THREE.PointLight(0xffd9a0, 1.6, 12, 1.6);
-  light.position.copy(glass.position);
-  g.add(light);
-
-  g.userData.glass = glass;
-  g.userData.glassMat = glassMat;
-  g.userData.core = core;
-  g.userData.light = light;
-
-  return g;
-}
 
 /* -----------------------------------------------------------
  * Ruins: ancient pillars with engraved bands and inset glyphs.
@@ -1345,36 +915,50 @@ function buildRuins() {
   const rng = mulberry32(13371);
   const clusters = [];
 
-  // distribute along the corridor from spawn toward the tower, plus
-  // a handful scattered laterally near the path so the player keeps
-  // discovering new ones as they travel.
-  const startZ = SPAWN_POSITION.z + 25;   // a few meters in front of spawn
-  const endZ = TOWER_POSITION.z + 25;     // stop short of the tower plaza
-  const total = 28;
+  // Distribute around the floating island plateau. We lay out clusters
+  // along a gentle spiral from the shrine outward to the cliff edge so
+  // the player naturally encounters them while exploring outward.
+  // Keep a clear corridor pointed toward the cliff edge (the path).
+  const TOTAL = 12;
+  const SHRINE_KEEPOUT = 12.0;   // never inside the shrine plaza
+  const CLIFF_PADDING = 14.0;    // never on / past the cliff edge
 
-  for (let i = 0; i < total; i++) {
-    const t = i / (total - 1);
-    const z = THREE.MathUtils.lerp(startZ, endZ, t) + (rng() - 0.5) * 28;
-    const sideRange = THREE.MathUtils.lerp(60, 26, t);
-    const x = (rng() - 0.5) * sideRange * 2;
+  let placed = 0;
+  let attempts = 0;
+  while (placed < TOTAL && attempts < TOTAL * 8) {
+    attempts++;
+    // spiral angle + jitter; bias outward as we go so clusters spread
+    const t = placed / (TOTAL - 1);
+    const baseAng = t * Math.PI * 2 * 1.6 + 0.8;
+    const ang = baseAng + (rng() - 0.5) * 0.6;
+    const radius = THREE.MathUtils.lerp(22, 88, t) + (rng() - 0.5) * 14;
+    const x = Math.cos(ang) * radius;
+    const z = Math.sin(ang) * radius;
 
-    // pick a variant — bias toward standing pillar, but mix in others
+    // distance checks against shrine + cliff edge
+    if (Math.hypot(x, z) < SHRINE_KEEPOUT) continue;
+    if (Math.hypot(x, z) > 110 - CLIFF_PADDING * 0.3) continue;
+    // keep a clear path corridor pointed at -Z (cliff edge)
+    if (Math.abs(x) < 4.0 && z < 0) continue;
+
+    // pick a variant — favor pillars/arches/obelisks (stately silhouettes
+    // that read against the sunrise sky)
     const r = rng();
     let variant;
-    if (r < 0.30) variant = "pillar";
-    else if (r < 0.45) variant = "fallen";
-    else if (r < 0.58) variant = "obelisk";
-    else if (r < 0.70) variant = "arch";
-    else if (r < 0.78) variant = "altar";
+    if (r < 0.32) variant = "pillar";
+    else if (r < 0.50) variant = "arch";
+    else if (r < 0.66) variant = "obelisk";
+    else if (r < 0.78) variant = "fallen";
     else if (r < 0.88) variant = "gateway";
-    else if (r < 0.95) variant = "statue";
-    else variant = "ziggurat";
+    else if (r < 0.95) variant = "altar";
+    else variant = "statue";
 
     const cluster = buildRuinCluster(rng, variant);
     cluster.position.set(x, getTerrainHeight(x, z) - 0.2, z);
     cluster.rotation.y = rng() * Math.PI * 2;
     g.add(cluster);
     clusters.push(cluster);
+    placed++;
   }
 
   g.userData.clusters = clusters;
@@ -2465,40 +2049,17 @@ export function updateWorld(world, dt, t) {
   }
   world.skyMat.uniforms.uTime.value = t;
 
-  // tower top spire pulse
-  const info = world.towerInfo;
-  if (info) {
-    const s = 1.0 + Math.sin(t * 0.9) * 0.05;
-    info.core.scale.setScalar(s);
-    info.glow.intensity = 7.0 + Math.sin(t * 0.9) * 1.4;
-    info.spireMat.emissiveIntensity = 0.55 + Math.sin(t * 1.1) * 0.18;
-    // accent rings shimmer slowly
-    for (let i = 0; i < info.accentMeshes.length; i++) {
-      const a = info.accentMeshes[i];
-      const phase = i * 0.27;
-      a.mat.opacity = 0.65 + Math.sin(t * 0.7 + phase) * 0.18;
-    }
-    // puzzle plates: dim while inactive, pulse warmly once lit
-    if (info.plates) {
-      for (const plate of info.plates) {
-        if (plate.lit) {
-          const k = Math.min(1, (t - plate.activatedAt) / 0.7);
-          const pulse = 0.85 + Math.sin(t * 2.4) * 0.12;
-          plate.light.intensity = THREE.MathUtils.lerp(0, 2.6 * pulse, k);
-          plate.glyphMat.opacity = 0.92;
-        } else {
-          plate.glyphMat.opacity = 0.55 + Math.sin(t * 1.6) * 0.06;
-        }
-      }
-    }
-  }
+  // shrine: dormant flicker by default; activate() triggers the swell
+  world.shrine?.update?.(dt, t);
 
-  // lamp gentle flicker
-  if (world.lamp?.userData?.glassMat) {
-    const flicker = 0.85 + Math.sin(t * 6.0) * 0.05 + (Math.random() - 0.5) * 0.06;
-    world.lamp.userData.glassMat.opacity = THREE.MathUtils.clamp(flicker, 0.7, 1.0);
-    world.lamp.userData.light.intensity = 1.4 + Math.sin(t * 5.5) * 0.18 + (Math.random() - 0.5) * 0.18;
-  }
+  // cliff props (windmills, banners, fragments, wind stones, bridges)
+  if (world.cliffs) updateCliffs(world.cliffs, dt, t);
+
+  // birds circling
+  if (world.birds) updateBirds(world.birds, dt, t);
+
+  // cloud sea drift + cloud puff parallax
+  if (world.clouds) updateClouds(world.clouds, dt, t);
 
   // footprint texture decay (slow)
   if (world.footprintLayer && world._fpDecayTimer === undefined) world._fpDecayTimer = 0;

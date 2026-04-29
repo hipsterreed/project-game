@@ -415,6 +415,26 @@ export class Audio {
     }
   }
 
+  /* swell back up after a fadeOut (used for restoration / finale) */
+  fadeIn(seconds = 3, target = 0.85, musicTarget = 0.55) {
+    if (this.ctx && this.master) {
+      const now = this.ctx.currentTime;
+      this.master.gain.setTargetAtTime(target, now, seconds * 0.5);
+    }
+    if (this.music) {
+      const startVol = this.music.volume;
+      const t0 = performance.now();
+      const ms = seconds * 1000;
+      const tick = () => {
+        if (!this.music) return;
+        const k = Math.min(1, (performance.now() - t0) / ms);
+        this.music.volume = startVol + (musicTarget - startVol) * k;
+        if (k < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }
+  }
+
   /* ----- helpers ----- */
 
   _whiteNoise(seconds = 4) {

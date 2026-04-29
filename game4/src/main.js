@@ -5,7 +5,7 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
-import { buildWorld, updateWorld, ARCH_POSITION, TOWER_POSITION, SPAWN_POSITION } from "./scene.js";
+import { buildWorld, updateWorld, SHRINE_POSITION, SPAWN_POSITION, CLIFF_EDGE } from "./scene.js";
 import { Player } from "./player.js";
 import { SandSystem } from "./sand.js";
 import { Audio } from "./audio.js";
@@ -14,22 +14,24 @@ import { ResonanceSystem } from "./resonance.js";
 import { ToneMapShader } from "./shaders.js";
 
 /* -----------------------------------------------------------
- * Main bootstrap & game loop
+ * Act One — The Quiet Cliffs
+ *   States:  awakening → exploring → restoring → ascending → finale
+ *   No HUD, no compass, no lore prose. The world tells the story.
  * --------------------------------------------------------- */
 
 const app = document.getElementById("app");
-const titleEl = document.getElementById("title");
-const beginBtn = document.getElementById("beginBtn");
+const titleEl = document.getElementById("title");      // legacy — kept hidden
+const beginBtn = document.getElementById("beginBtn");  // legacy — auto-clicked away
 const hud = document.getElementById("hud");
 const promptEl = document.getElementById("prompt");
-const loreEl = document.getElementById("lore");
-const loreText = document.getElementById("loreText");
 const cineEl = document.getElementById("cine");
 const cineText = document.getElementById("cineText");
 const ending = document.getElementById("ending");
 const loading = document.getElementById("loading");
 const compass = document.getElementById("compass");
-const compassLabel = document.getElementById("compassLabel");
+
+// hide the HUD legacy bits — the cliffs demo is silent
+if (compass) compass.style.display = "none";
 
 // ---- renderer ----
 const renderer = new THREE.WebGLRenderer({
@@ -40,19 +42,18 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.85;
+renderer.toneMappingExposure = 0.92;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 app.appendChild(renderer.domElement);
 
 // ---- scene & camera ----
 const scene = new THREE.Scene();
-
 const camera = new THREE.PerspectiveCamera(
   62,
   window.innerWidth / window.innerHeight,
   0.05,
-  1500,
+  2000,
 );
 camera.position.set(0, 6, 12);
 camera.userData.domElement = renderer.domElement;
@@ -62,9 +63,12 @@ const world = buildWorld(scene, renderer);
 
 // ---- player ----
 const player = new Player(scene, camera, world);
-player.spawn(SPAWN_POSITION);
+// place player next to the shrine, facing toward the cliff edge
+const spawn = new THREE.Vector3(SPAWN_POSITION.x, 0, SPAWN_POSITION.z);
+spawn.y = world.getTerrainHeight(spawn.x, spawn.z);
+player.spawn(spawn);
 
-// ---- sand particles ----
+// ---- sand particles (footstep dust + ambient drift = "wind made visible") ----
 const sand = new SandSystem(scene, world);
 
 // ---- audio ----
@@ -74,45 +78,35 @@ const audio = new Audio();
 const flowers = new FlowerSystem(scene, world);
 const resonance = new ResonanceSystem({
   scene, world, player, sand, flowers, audio,
-  towerPos: TOWER_POSITION,
+  // pass shrine pos as the legacy "towerPos" — used by resonance's
+  // particle stream direction math; cliffs aim motes upward toward
+  // The Last Light when the player walks past, which reads great.
+  towerPos: new THREE.Vector3(SHRINE_POSITION.x, 80, SHRINE_POSITION.z - 30),
 });
 
+// ---- footsteps: dust on dirt patches, tiny chance of bloom near shrine ----
 player.onFootstep = (foot, pos, vel, sprintBlend) => {
+  if (mode === "awakening") return;            // silent until standing
   audio.playFootstep(0.6 + sprintBlend * 0.4, sprintBlend);
 
-  // only stamp footprints + kick up grains when actually on sand terrain,
-  // not when stepping on tower stone / stairs
   const terrainY = world.getTerrainHeight(pos.x, pos.z);
   if (Math.abs(pos.y - terrainY) < 0.6) {
     const angle = Math.atan2(vel.x, vel.z) || 0;
-    world.footprintLayer?.stamp(pos.x, pos.z, angle, foot, 0.7 + sprintBlend * 0.2);
+    world.footprintLayer?.stamp(pos.x, pos.z, angle, foot, 0.6 + sprintBlend * 0.2);
     sand.emitFootstep(pos, vel, sprintBlend);
   }
 
-  // tower-proximity vibrant blooms: as the player walks within range
-  // of the tower, leave a trail of vibrant blooms at footstep positions.
-  // Cap rate via random gating so the trail doesn't carpet the ground.
-  const dx = pos.x - TOWER_POSITION.x;
-  const dz = pos.z - TOWER_POSITION.z;
-  const distToTower = Math.hypot(dx, dz);
-  if (distToTower < 60 && Math.random() < 0.35) {
-    // offset slightly to either side of the foot for natural placement
+  // glowing flowers on every step within the shrine plaza after restoration
+  if (world.shrine?.isActive() && Math.hypot(pos.x, pos.z) < 28 && Math.random() < 0.35) {
     const off = (foot === "L" ? -0.4 : 0.4);
-    const sideX = Math.cos(angleSafe(vel)) * off;
-    const sideZ = Math.sin(angleSafe(vel)) * off;
-    flowers.spawnVibrant(pos.x + sideX, pos.z + sideZ);
+    const ang = Math.atan2(vel.x, vel.z) + Math.PI / 2;
+    flowers.spawnVibrant(pos.x + Math.cos(ang) * off, pos.z + Math.sin(ang) * off);
   }
 };
 player.onLand = (impactSpeed) => {
+  if (mode === "awakening") return;
   audio.playLanding(impactSpeed);
 };
-
-function angleSafe(vel) {
-  // returns the angle perpendicular (right-hand) to motion; falls back to 0
-  if (!vel) return 0;
-  const a = Math.atan2(vel.x, vel.z);
-  return a + Math.PI / 2;
-}
 
 // ---- post-processing ----
 const composer = new EffectComposer(renderer);
@@ -120,111 +114,301 @@ composer.addPass(new RenderPass(scene, camera));
 
 const bloom = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.36, // strength
-  0.95, // radius
-  0.86, // threshold
+  0.42,    // strength — bumped a touch so the shrine + Last Light glow more
+  0.95,
+  0.84,
 );
 composer.addPass(bloom);
 
 const tonePass = new ShaderPass(ToneMapShader);
 composer.addPass(tonePass);
-
 composer.addPass(new OutputPass());
 
-// ---- state machine ----
-let mode = "menu"; // "menu" | "intro" | "playing" | "cinematic" | "ending"
-let menuTime = 0;
-let endTime = 0;
+/* -----------------------------------------------------------
+ * State machine
+ * --------------------------------------------------------- */
+let mode = "awakening";       // awakening → exploring → restoring → ascending → finale → done
+let stateTime = 0;             // seconds since this state began
+let firstInputAt = 0;          // when the player first touched a key/mouse
 
-const menuPath = (t) => {
-  const r = 14;
-  const x = Math.sin(t * 0.06) * r * 0.7;
-  const z = 18 + Math.cos(t * 0.05) * 4;
-  const y = world.getHeight(x, z) + 3.4 + Math.sin(t * 0.13) * 0.2;
-  camera.position.set(x, y, z);
-  camera.lookAt(0, 1.4, -40);
-};
+// finale fade overlay (created lazily)
+let fadeOverlay = null;
 
-// Browsers block audio playback until a user gesture, so we can't truly
-// start music at page load. Next-best thing: retry on every input event
-// until the <audio> element reports as actually playing. Some browsers
-// don't treat pointermove as a valid activation, so we keep retrying
-// through pointerdown/keydown/touchstart/click as well.
-function startMusicOnFirstGesture() {
-  const kick = () => {
-    audio.start();              // idempotent: starts the synth bed once
-    audio._unmuteMusic?.();     // retries play() + unmutes every time
-    if (audio.music && !audio.music.paused && !audio.music.muted) {
-      window.removeEventListener("pointerdown", kick);
-      window.removeEventListener("pointermove", kick);
-      window.removeEventListener("keydown", kick);
-      window.removeEventListener("touchstart", kick);
-      window.removeEventListener("click", kick, true);
-    }
-  };
-  window.addEventListener("pointerdown", kick);
-  window.addEventListener("pointermove", kick);
-  window.addEventListener("keydown", kick);
-  window.addEventListener("touchstart", kick);
-  // capture-phase click so we fire before the Begin button's handler
-  window.addEventListener("click", kick, true);
+// ---- begin: skip the legacy menu/Begin flow, start in awakening ----
+titleEl?.classList.add("hidden");
+beginBtn?.classList.add("hidden");
+hud?.classList.add("visible");
+
+// the first input transitions into "exploring" — until then, controls
+// are locked and the camera sits low looking at the shrine.
+let controlsEnabled = false;
+
+function arm() {
+  audio.start();
+  audio._unmuteMusic?.();
 }
-startMusicOnFirstGesture();
 
-beginBtn.addEventListener("click", () => {
-  if (mode !== "menu") return;
-  mode = "intro";
-  titleEl.classList.add("hidden");
-  hud.classList.add("visible");
-
-  audio.start(); // safe to call again — guarded by `started` flag
-  renderer.domElement.requestPointerLock?.();
-  player.enableControl();
-
-  setTimeout(() => {
-    mode = "playing";
-    showPrompt("walk forward");
-    setTimeout(() => hidePrompt(), 4500);
-  }, 1400);
+window.addEventListener("pointerdown", () => {
+  arm();
+  if (mode === "awakening") tryWake();
+});
+window.addEventListener("keydown", (e) => {
+  arm();
+  if (mode === "awakening") tryWake();
+  // press E near the shrine to trigger restoration
+  if (e.code === "KeyE" && mode === "exploring") {
+    if (canRestoreNow()) startRestoration();
+  }
 });
 
-function showPrompt(text) {
-  promptEl.textContent = text;
-  promptEl.classList.add("show");
-}
-function hidePrompt() {
-  promptEl.classList.remove("show");
-}
-
-function showLore(text) {
-  loreText.textContent = text;
-  loreEl.classList.add("show");
-}
-function hideLore() {
-  loreEl.classList.remove("show");
+function tryWake() {
+  if (firstInputAt > 0) return;
+  firstInputAt = clock.getElapsedTime();
+  // request pointer lock on first gesture
+  renderer.domElement.requestPointerLock?.();
+  // controls are enabled in the awakening→exploring transition (so the
+  // intro 1.4s isn't disrupted by the player walking through the camera)
+  showTitle("The Quiet Cliffs", 0.5, 4.0, 1.5);
 }
 
-function showCine(text) {
-  cineText.textContent = "";
-  cineEl.classList.add("show");
-  // typewriter
-  const total = text.length;
-  let i = 0;
-  if (cineText._typewriterTimer) clearInterval(cineText._typewriterTimer);
-  cineText._typewriterTimer = setInterval(() => {
-    i += 1;
-    cineText.textContent = text.slice(0, i);
-    if (i >= total) {
-      clearInterval(cineText._typewriterTimer);
-      cineText._typewriterTimer = null;
+/* -----------------------------------------------------------
+ * Awakening pose — the player starts crouched/seated until first
+ *   input. We achieve "seated" by lowering the body group + a
+ *   forward tilt, then ease back to standing on first input.
+ *
+ *   Camera is locked low and angled at the dormant shrine.
+ * --------------------------------------------------------- */
+// (seatedTarget / standingTarget pose constants used to live here, but
+//  modifying player.body.rotation fights the player's per-frame quat
+//  set. The awakening framing is now camera-only.)
+
+// disable input from the start — Player.enableControl() is called on first input
+player.canControl = false;
+
+/* -----------------------------------------------------------
+ * Title overlay (single line, no UI library) — fades in/out and
+ *   lives on top of the canvas. Reuses the loading <div> as a
+ *   scrim wrapper.
+ * --------------------------------------------------------- */
+function ensureFadeOverlay() {
+  if (fadeOverlay) return fadeOverlay;
+  const el = document.createElement("div");
+  el.style.position = "fixed";
+  el.style.inset = "0";
+  el.style.background = "white";
+  el.style.opacity = "0";
+  el.style.pointerEvents = "none";
+  el.style.transition = "opacity 1.6s ease-in-out";
+  el.style.zIndex = "100";
+  document.body.appendChild(el);
+  fadeOverlay = el;
+  return el;
+}
+
+let titleEl2 = null;
+function showTitle(text, fadeInDelay, hold, fadeDur) {
+  if (!titleEl2) {
+    titleEl2 = document.createElement("div");
+    titleEl2.style.position = "fixed";
+    titleEl2.style.inset = "0";
+    titleEl2.style.display = "flex";
+    titleEl2.style.alignItems = "center";
+    titleEl2.style.justifyContent = "center";
+    titleEl2.style.color = "rgba(255, 240, 220, 0.92)";
+    titleEl2.style.font = "300 38px/1.2 Georgia, serif";
+    titleEl2.style.letterSpacing = "0.18em";
+    titleEl2.style.opacity = "0";
+    titleEl2.style.pointerEvents = "none";
+    titleEl2.style.textShadow = "0 0 24px rgba(40, 20, 8, 0.55)";
+    titleEl2.style.transition = "opacity 1.4s ease-in-out";
+    titleEl2.style.zIndex = "60";
+    document.body.appendChild(titleEl2);
+  }
+  titleEl2.textContent = text;
+  setTimeout(() => { titleEl2.style.opacity = "1"; }, fadeInDelay * 1000);
+  setTimeout(() => { titleEl2.style.opacity = "0"; }, (fadeInDelay + hold) * 1000);
+}
+
+let endEl = null;
+function showEnd(text) {
+  if (!endEl) {
+    endEl = document.createElement("div");
+    endEl.style.position = "fixed";
+    endEl.style.inset = "0";
+    endEl.style.display = "flex";
+    endEl.style.alignItems = "center";
+    endEl.style.justifyContent = "center";
+    endEl.style.color = "rgba(80, 50, 30, 0.85)";
+    endEl.style.font = "300 28px/1.4 Georgia, serif";
+    endEl.style.letterSpacing = "0.22em";
+    endEl.style.opacity = "0";
+    endEl.style.pointerEvents = "none";
+    endEl.style.transition = "opacity 2.0s ease-in-out 1.4s";
+    endEl.style.zIndex = "120";
+    document.body.appendChild(endEl);
+  }
+  endEl.textContent = text;
+  endEl.style.opacity = "1";
+}
+
+/* ----- press-E prompt for the shrine ----- */
+function showShrinePrompt() {
+  if (promptEl) {
+    promptEl.textContent = "[E] place your hand";
+    promptEl.classList.add("show");
+  }
+}
+function hideShrinePrompt() {
+  if (promptEl) promptEl.classList.remove("show");
+}
+
+/* -----------------------------------------------------------
+ * Restoration trigger
+ * --------------------------------------------------------- */
+function canRestoreNow() {
+  if (world.shrine?.isActive()) return false;
+  const sp = world.shrine.worldPos();
+  const dx = player.position.x - sp.x;
+  const dz = player.position.z - sp.z;
+  const d = Math.hypot(dx, dz);
+  return d < 4.5;
+}
+
+function startRestoration() {
+  mode = "restoring";
+  stateTime = 0;
+  hideShrinePrompt();
+  player.canControl = false;
+  audio.fadeOut(1.0);
+  // arm the wave; the resonance system carries it out from here
+  resonance.triggerRipple?.(world.shrine.worldPos(), {
+    speed: 36,           // m/s — covers ~110m in ~3s
+    maxRadius: 200,
+    onComplete: () => {
+      // finale opens up after restoration settles
+      mode = "ascending";
+      stateTime = 0;
+      player.canControl = true;
+      audio.fadeIn(2.5);
+    },
+  });
+  // the shrine itself starts swelling immediately
+  world.shrine.activate(clock.getElapsedTime());
+}
+
+// camera helpers for awakening intro pan
+const _camIdealPos = new THREE.Vector3();
+const _camLook = new THREE.Vector3();
+const _tmpVec = new THREE.Vector3();
+
+function awakeningCameraUpdate(dt, t) {
+  // Awakening framing: camera sits low and slightly behind/right of the
+  // player. Player is facing -Z (toward the cliff edge / sunrise). The
+  // dormant shrine sits at (0,0,0), just to the player's rear-left, so
+  // it reads in the foreground. The Last Light is visible above the
+  // cliff in the distance.
+  // (We don't modify the player's body pose — the camera framing alone
+  //  communicates the quiet, intimate moment.)
+  const sway = Math.sin(t * 0.08) * 0.02;
+  const targetX = player.position.x + 2.6 + sway;
+  const targetY = player.position.y + 1.55;
+  const targetZ = player.position.z + 3.4;
+  _camIdealPos.set(targetX, targetY, targetZ);
+  camera.position.lerp(_camIdealPos, dt * 1.6);
+  // look slightly forward and up — toward the cliff edge, with the
+  // shrine framed off camera-left
+  _camLook.set(player.position.x - 1.2, player.position.y + 1.7, player.position.z - 28);
+  camera.lookAt(_camLook);
+}
+
+function intoExploringEase(dt) {
+  // no body pose to ease — the player stands naturally as soon as they
+  // gain control. The mode transition itself is the visual cue.
+}
+
+// Soft fall-prevention: if the player slips off the cliff before
+// restoration, gently teleport them back to spawn rather than letting
+// them plunge into the void.
+function fallPrevention() {
+  if (player.position.y < -40) {
+    player.position.set(spawn.x, spawn.y + 0.5, spawn.z);
+    player.velocity.set(0, 0, 0);
+  }
+}
+
+function restoringCameraUpdate(dt, t) {
+  // slow-zoom toward the shrine
+  const sp = world.shrine.worldPos();
+  const ang = stateTime * 0.20;     // small drift around shrine
+  const dist = THREE.MathUtils.lerp(5.0, 2.6, THREE.MathUtils.smoothstep(stateTime, 0, 1.5));
+  const yOff = 1.6;
+  _camIdealPos.set(
+    sp.x - Math.sin(ang) * dist,
+    sp.y + yOff,
+    sp.z - Math.cos(ang) * dist,
+  );
+  camera.position.lerp(_camIdealPos, dt * 1.3);
+  camera.lookAt(sp.x, sp.y + 2.0, sp.z);
+}
+
+let finaleStarted = false;
+function maybeStartFinale() {
+  if (finaleStarted) return;
+  // distance to the cliff edge
+  const dx = player.position.x - CLIFF_EDGE.x;
+  const dz = player.position.z - CLIFF_EDGE.z;
+  const d = Math.hypot(dx, dz);
+  if (d < 6.0) {
+    finaleStarted = true;
+    mode = "finale";
+    stateTime = 0;
+    player.canControl = false;
+  }
+}
+
+function finaleUpdate(dt, t) {
+  // 0..3.5s : camera tilts up, cloud sea sinks, Last Light grows
+  const u = THREE.MathUtils.clamp(stateTime / 3.5, 0, 1);
+  const eased = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+
+  // cloud part driver
+  if (world.clouds) {
+    world.clouds.partFactor.value = eased;
+    world.clouds.plane.position.y = -42 - eased * 24;   // sinks
+  }
+  // Last Light grows
+  world.skyMat.uniforms.uPlanetSize.value = 0.06 + eased * 0.10;
+  // sky base brightens slightly toward white
+  const horiz = world.skyMat.uniforms.uHorizon.value;
+  horiz.lerp(new THREE.Color("#ffe4c4"), dt * 0.6);
+
+  // camera: from current position, tilt up toward Last Light
+  const lp = world.skyMat.uniforms.uPlanetDir.value;
+  const lookTarget = _tmpVec.set(
+    player.position.x + lp.x * 600,
+    player.position.y + lp.y * 600,
+    player.position.z + lp.z * 600,
+  );
+  camera.position.x = THREE.MathUtils.lerp(camera.position.x, player.position.x, dt * 0.8);
+  camera.position.y = THREE.MathUtils.lerp(camera.position.y, player.position.y + 2.8, dt * 0.6);
+  camera.position.z = THREE.MathUtils.lerp(camera.position.z, player.position.z + 2.0, dt * 0.8);
+  camera.lookAt(lookTarget);
+
+  // fade to white starting at 3.0s
+  if (stateTime > 3.0) {
+    const fadeT = THREE.MathUtils.clamp((stateTime - 3.0) / 2.0, 0, 1);
+    const ov = ensureFadeOverlay();
+    ov.style.opacity = `${fadeT}`;
+    if (fadeT >= 1.0 && mode !== "done") {
+      mode = "done";
+      showEnd("to be continued");
     }
-  }, 50);
-}
-function hideCine() {
-  cineEl.classList.remove("show");
+  }
 }
 
-// ---- main loop ----
+/* -----------------------------------------------------------
+ * Main loop
+ * --------------------------------------------------------- */
 const clock = new THREE.Clock();
 let lastTime = 0;
 
@@ -232,289 +416,95 @@ function animate() {
   const t = clock.getElapsedTime();
   const dt = Math.min(0.05, t - lastTime);
   lastTime = t;
+  stateTime += dt;
 
   updateWorld(world, dt, t);
   tonePass.uniforms.uTime.value = t;
 
-  if (mode === "menu") {
-    menuTime += dt;
-    menuPath(menuTime);
-  } else if (mode === "intro") {
+  // ---- player update with state-aware overrides ----
+  if (mode === "awakening") {
     player.update(dt, t);
-  } else if (mode === "playing") {
+    awakeningCameraUpdate(dt, t);
+  } else if (mode === "exploring") {
     player.update(dt, t);
-    handleLampProximity();
-    handleTowerCinematicTrigger();
-    handleTopProximity();
-    handlePuzzleProximity();
-  } else if (mode === "cinematic") {
-    // player still updates (so cloak/ribbons keep alive) but input
-    // is locked because canControl was disabled when entering this mode
+    intoExploringEase(dt);
+    fallPrevention();
+    // proximity prompt for the shrine
+    if (canRestoreNow()) showShrinePrompt(); else hideShrinePrompt();
+  } else if (mode === "restoring") {
     player.update(dt, t);
-    updateCinematicCamera(dt, t);
-  } else if (mode === "ending") {
-    endTime += dt;
+    restoringCameraUpdate(dt, t);
+    // when the wave + bridge reform are clearly underway we'll move on,
+    // but the resonance ripple onComplete callback also bumps us to ascending.
+  } else if (mode === "ascending") {
     player.update(dt, t);
-    const o = Math.min(1, endTime / 8);
-    camera.position.y += dt * 0.3;
-    camera.fov = THREE.MathUtils.lerp(camera.fov, 50, dt * 0.4);
-    camera.updateProjectionMatrix();
+    maybeStartFinale();
+    fallPrevention();
+  } else if (mode === "finale") {
+    player.update(dt, t);
+    finaleUpdate(dt, t);
+  } else {
+    // "done" — keep updating particles + cloak so the final shot is alive
+    player.update(dt, t);
   }
 
-  // sun shadow camera follows the player (keeps shadows crisp around them)
-  if (mode !== "menu") {
-    const sd = world.sunDir;
-    world.sun.position.set(
-      player.position.x + sd.x * 120,
-      player.position.y + sd.y * 120,
-      player.position.z + sd.z * 120,
-    );
-    world.sun.target.position.copy(player.position);
-    world.sun.target.updateMatrixWorld();
+  // promote awakening -> exploring once the body has stood up enough
+  if (mode === "awakening" && firstInputAt > 0 && (t - firstInputAt) > 1.4) {
+    mode = "exploring";
+    stateTime = 0;
+    player.enableControl();
   }
+
+  // sun shadow camera follows the player
+  const sd = world.sunDir;
+  world.sun.position.set(
+    player.position.x + sd.x * 120,
+    player.position.y + sd.y * 120,
+    player.position.z + sd.z * 120,
+  );
+  world.sun.target.position.copy(player.position);
+  world.sun.target.updateMatrixWorld();
 
   // wind for sand & audio
-  const wind = computeGlobalWind(t, player.velocity);
+  const windScale = (mode === "awakening") ? 0.2 : (world.shrine?.isActive() ? 1.3 : 1.0);
+  const wind = computeGlobalWind(t, player.velocity, windScale);
   sand.update(dt, t, wind, camera, player);
   flowers.update(dt);
-  if (mode === "playing" || mode === "ending" || mode === "cinematic") {
-    resonance.update(dt, t);
-  }
+  if (mode !== "awakening") resonance.update(dt, t);
   audio.update(dt, t, {
     speed: player.currentSpeed,
     sliding: player.sliding,
-    archProximity: getArchProximity(),
+    archProximity: world.shrine?.isActive() ? 1.0 : 0.0,
   });
 
-  if (mode === "playing") updateCompass();
+  // restoration animation drivers (cliff props)
+  if (mode === "restoring" || mode === "ascending" || mode === "finale" || mode === "done") {
+    const since = (mode === "restoring") ? stateTime : Math.max(stateTime + 6, 6);
+    world.cliffs?.setRestoring(THREE.MathUtils.clamp(since / 2.5, 0, 1));
+    world.cliffs?.setBridgeReformProgress(THREE.MathUtils.clamp((since - 0.4) / 3.5, 0, 1));
+    // wind bridge: starts forming after restoration ripple has covered
+    // the island (~5s in restoring), then completes during ascending.
+    const wbT = (mode === "restoring")
+      ? THREE.MathUtils.clamp((stateTime - 4.0) / 4.0, 0, 1)
+      : THREE.MathUtils.clamp(1.0 + stateTime / 6.0, 0, 1);
+    world.cliffs?.setWindBridgeProgress(wbT);
+  }
 
   composer.render();
   requestAnimationFrame(animate);
 }
 
 const _windTmp = new THREE.Vector3();
-function computeGlobalWind(t, playerVel) {
-  const base = -1.4 + Math.sin(t * 0.15) * 0.5;
+function computeGlobalWind(t, playerVel, scale = 1.0) {
+  const base = -1.2 + Math.sin(t * 0.15) * 0.45;
   _windTmp.set(
     base + Math.sin(t * 0.4) * 0.3,
     0.05 + Math.sin(t * 0.31) * 0.04,
     Math.sin(t * 0.27) * 0.3,
   );
+  _windTmp.multiplyScalar(scale);
   _windTmp.addScaledVector(playerVel, -0.3);
   return _windTmp;
-}
-
-function getArchProximity() {
-  const d = player.distanceToArch();
-  return THREE.MathUtils.clamp(1 - d / 220, 0, 1);
-}
-
-function updateCompass() {
-  const toArch = new THREE.Vector3().subVectors(world.archTrigger, player.position);
-  toArch.y = 0;
-  const cam = new THREE.Vector3().subVectors(player.position, camera.position);
-  cam.y = 0; cam.normalize();
-  const camAng = Math.atan2(cam.x, cam.z);
-  const archAng = Math.atan2(toArch.x, toArch.z);
-  let dy = archAng - camAng;
-  while (dy > Math.PI) dy -= Math.PI * 2;
-  while (dy < -Math.PI) dy += Math.PI * 2;
-  const aligned = Math.abs(dy) < 0.18;
-  const dist = player.distanceToArch();
-  const closeFade = THREE.MathUtils.clamp(1 - (1 - dist / 220), 0, 1);
-  compass.style.opacity = `${(aligned ? 0.18 : 0.55) * (0.4 + 0.6 * closeFade)}`;
-  if (dist < 12) {
-    compassLabel.textContent = "the tower";
-  }
-}
-
-// ---- lamp lore (near spawn) ----
-const LAMP_LORE = [
-  "they say the tower listens.",
-  "if your steps reach the top,",
-  "what aches inside you will be answered.",
-];
-let lampLoreShown = false;
-let lampLoreLeft = false;
-function handleLampProximity() {
-  if (!world.lamp) return;
-  const dx = player.position.x - world.lamp.position.x;
-  const dz = player.position.z - world.lamp.position.z;
-  const d = Math.hypot(dx, dz);
-
-  if (d < 3.5 && !lampLoreShown) {
-    lampLoreShown = true;
-    // sequence the three lines
-    showLore(LAMP_LORE[0]);
-    setTimeout(() => showLore(LAMP_LORE.slice(0, 2).join("  ")), 2400);
-    setTimeout(() => showLore(LAMP_LORE.join("  ")), 5200);
-    setTimeout(() => hideLore(), 11500);
-  }
-  if (d > 9 && lampLoreShown && !lampLoreLeft) {
-    lampLoreLeft = true;
-    hideLore();
-  }
-  if (d > 16) {
-    // allow re-trigger if the player wanders back later
-    lampLoreShown = false;
-    lampLoreLeft = false;
-  }
-}
-
-// ---- tower puzzle: 3 glyph plates at the base ----
-// Stairs have a missing middle section. Press E near each plate to
-// light it; once all three are lit, the upper steps phase in.
-let puzzleNearIndex = -1;
-let puzzleSolved = false;
-
-function handlePuzzleProximity() {
-  if (puzzleSolved) return;
-  const plates = world.towerInfo?.plates;
-  if (!plates) return;
-
-  let closest = -1;
-  let closestD = 2.6; // activation radius
-  for (let i = 0; i < plates.length; i++) {
-    const p = plates[i];
-    if (p.lit) continue;
-    const dx = player.position.x - (TOWER_POSITION.x + p.x);
-    const dz = player.position.z - (TOWER_POSITION.z + p.z);
-    const d = Math.hypot(dx, dz);
-    if (d < closestD) { closestD = d; closest = i; }
-  }
-
-  if (closest !== puzzleNearIndex) {
-    puzzleNearIndex = closest;
-    if (closest >= 0) {
-      const remaining = plates.filter((p) => !p.lit).length;
-      showPrompt(remaining > 1 ? "[E] activate" : "[E] activate — final glyph");
-    } else {
-      hidePrompt();
-    }
-  }
-}
-
-window.addEventListener("keydown", (e) => {
-  if (e.code !== "KeyE") return;
-  if (mode !== "playing") return;
-  if (puzzleSolved || puzzleNearIndex < 0) return;
-  const plates = world.towerInfo?.plates;
-  if (!plates) return;
-  const plate = plates[puzzleNearIndex];
-  if (!plate || plate.lit) return;
-
-  plate.lit = true;
-  plate.activatedAt = clock.getElapsedTime();
-  plate.glyphMat.color.setHex(0x9be0e8);
-  plate.light.intensity = 2.6;
-  audio.playFootstep?.(0.7, 0.4); // soft chime placeholder
-  puzzleNearIndex = -1;
-  hidePrompt();
-
-  if (plates.every((p) => p.lit)) {
-    puzzleSolved = true;
-    world.unlockTowerStairs();
-    showPrompt("the stairs awaken");
-    setTimeout(hidePrompt, 4000);
-  } else {
-    const left = plates.filter((p) => !p.lit).length;
-    showPrompt(`${left} glyph${left > 1 ? "s" : ""} remain`);
-    setTimeout(hidePrompt, 2200);
-  }
-});
-
-// ---- tower approach cinematic ----
-let cinematicArmed = true;
-let cineStart = 0;
-let cineFrom = new THREE.Vector3();
-let cineFromLook = new THREE.Vector3();
-let cineDuration = 6.5;
-
-function handleTowerCinematicTrigger() {
-  const dx = player.position.x - TOWER_POSITION.x;
-  const dz = player.position.z - TOWER_POSITION.z;
-  const d = Math.hypot(dx, dz);
-  if (cinematicArmed && d < 18) {
-    enterCinematic();
-  }
-  // re-arm if player walks far away
-  if (d > 60) cinematicArmed = true;
-}
-
-function enterCinematic() {
-  cinematicArmed = false;
-  mode = "cinematic";
-  cineStart = clock.getElapsedTime();
-  cineFrom.copy(camera.position);
-  // remember a current look-target near the player
-  cineFromLook.copy(player.position).y += 1.5;
-  // freeze player input
-  player.canControl = false;
-  showCine("the top speaks to you...");
-}
-
-function exitCinematic() {
-  hideCine();
-  mode = "playing";
-  player.canControl = true;
-  // request pointer lock again so mouse-look resumes
-  renderer.domElement.requestPointerLock?.();
-}
-
-function updateCinematicCamera(dt, t) {
-  const elapsed = t - cineStart;
-  const u = THREE.MathUtils.clamp(elapsed / cineDuration, 0, 1);
-  // ease in/out
-  const eased = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
-
-  // camera path: start from player follow position, move to a slow
-  // tilt up the tower from a mid-distance vantage.
-  const towerY = world.archTrigger.y;
-  const totalH = world.towerInfo?.totalHeight || 80;
-
-  // anchor: a viewing point ~28m south of the tower at chest-cam height
-  const ax = TOWER_POSITION.x;
-  const az = TOWER_POSITION.z + 28;
-  const ay = towerY + 8 + eased * (totalH * 0.35);
-
-  // blend from cineFrom -> anchor over the first 25% then hold
-  const blend = THREE.MathUtils.smoothstep(elapsed, 0, cineDuration * 0.25);
-  camera.position.x = THREE.MathUtils.lerp(cineFrom.x, ax, blend);
-  camera.position.y = THREE.MathUtils.lerp(cineFrom.y, ay, blend);
-  camera.position.z = THREE.MathUtils.lerp(cineFrom.z, az, blend);
-
-  // look target: pan from base to top of the tower
-  const lookY = towerY + eased * (totalH + 4);
-  camera.lookAt(TOWER_POSITION.x, lookY, TOWER_POSITION.z);
-
-  if (u >= 1) {
-    // a beat after the pan completes, ease back to gameplay
-    if (elapsed > cineDuration + 1.6) exitCinematic();
-  }
-}
-
-// ---- top-of-tower trigger -> ending ----
-let topReached = false;
-function handleTopProximity() {
-  if (topReached) return;
-  const dx = player.position.x - TOWER_POSITION.x;
-  const dz = player.position.z - TOWER_POSITION.z;
-  const radial = Math.hypot(dx, dz);
-  const towerY = world.archTrigger.y;
-  const totalH = world.towerInfo?.totalHeight || 80;
-  if (player.position.y > towerY + totalH * 0.85 && radial < 6) {
-    topReached = true;
-    enterEnding();
-  }
-}
-
-function enterEnding() {
-  mode = "ending";
-  endTime = 0;
-  audio.fadeOut(8);
-  hud.classList.remove("visible");
-  ending.classList.add("show");
-  document.exitPointerLock?.();
 }
 
 // ---- resize ----
@@ -528,5 +518,5 @@ window.addEventListener("resize", () => {
 });
 
 // ---- kick off ----
-loading.classList.add("gone");
+loading?.classList.add("gone");
 animate();

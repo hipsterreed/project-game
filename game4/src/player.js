@@ -833,25 +833,8 @@ export class Player {
     // ---- integrate position ----
     this.position.addScaledVector(this.velocity, dt);
 
-    // ---- column collision: tower body blocks horizontal movement
-    // (radius is height-aware so the player can wrap around stairs
-    // up the spiral as the tower tapers). ----
-    if (this.world.blocksColumn?.(this.position.x, this.position.z, this.position.y)) {
-      const towerX = 0;
-      const towerZ = this.world.archTrigger?.z ?? -340;
-      const dx = this.position.x - towerX;
-      const dz = this.position.z - towerZ;
-      const len = Math.hypot(dx, dz) || 1e-5;
-      const yLocal = Math.max(0, this.position.y - (this.world.archTrigger?.y ?? 0));
-      const r = (this.world.towerInfo?.radiusAt?.(yLocal) ?? this.world.towerBaseRadius) + 0.35;
-      this.position.x = towerX + (dx / len) * r;
-      this.position.z = towerZ + (dz / len) * r;
-      const radial = (this.velocity.x * dx + this.velocity.z * dz) / (len * len);
-      if (radial < 0) {
-        this.velocity.x -= radial * dx;
-        this.velocity.z -= radial * dz;
-      }
-    }
+    // (column-blocker hook left in place — currently a no-op on the
+    // floating island, since the cliff falloff handles edges naturally.)
 
     // ---- ground / step collision ----
     const ceilY = this.position.y + 0.05;
@@ -1205,7 +1188,12 @@ export class Player {
    * Distance to the arch (used for HUD compass and ending).
    * --------------------------------------------------------- */
   distanceToArch() {
-    return this.position.distanceTo(this.world.archTrigger);
+    // legacy helper — kept so external callers don't crash. Returns the
+    // distance to whatever the world considers the focal point (now the
+    // shrine/cliff anchor).
+    return this.world.archTrigger
+      ? this.position.distanceTo(this.world.archTrigger)
+      : 0;
   }
 }
 
