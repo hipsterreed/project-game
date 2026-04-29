@@ -107,6 +107,8 @@ export class Player {
     this._buildLegs();        // tapered leg spikes from inside cloak
     this._buildChestEmblem(); // glow on the front of the cone (heart)
     this._buildChestFragments(); // small stone/glass shards on the cone
+    this._buildHeldLantern(); // small lantern carried in the right hand
+    this._buildLanternArm();  // visible arm reaching from shoulder to the lantern
 
     // trailing ribbons (like memory pulled through the air)
     this.ribbons = this._buildRibbons();
@@ -132,35 +134,52 @@ export class Player {
   }
 
   _buildHood() {
-    // A flowing hooded silhouette draped from the shoulders up over the
-    // head. Replaces the old dark-sphere head + dome-hat combo. The shape
-    // is a tall sphere segment (top half), open at the bottom, with the
-    // crown leaning back so the cloth reads as cloth, not a hat.
+    // A flowing hooded silhouette: full cloth over the top of the head,
+    // draped down the back/sides, with a U-shaped face opening at the
+    // front so the face is visible. We start with a closed hemisphere
+    // (covers the whole crown), then per-vertex lift the lower-front rim
+    // upward to carve out the face opening — gives a clean monk-hood
+    // look without leaving the top exposed.
     //
     // Same flow shader as the cone cloak so the hood sways with the same
     // wind/motion/lag state.
     const hoodGeo = new THREE.SphereGeometry(
-      0.30,
-      18,                // radial segs
-      14,                // vertical segs (more, so flow ripples are visible)
-      0, Math.PI * 2,
-      0,                 // thetaStart (top pole)
-      Math.PI * 0.95,    // thetaLength (almost full hemisphere -> open at neck)
+      0.28,
+      22, 16,
+      0, Math.PI * 2,            // full phi — closed top
+      0, Math.PI * 0.88,         // drapes past the equator down the back
     );
-    hoodGeo.scale(1.0, 1.55, 1.05); // taller than wide for a draped silhouette
+    hoodGeo.scale(1.0, 1.30, 1.05);
 
-    // Lean the crown backward + add weathered jitter so the hood doesn't
-    // read like a perfect dome.
     const hp = hoodGeo.attributes.position;
     for (let i = 0; i < hp.count; i++) {
-      const y = hp.getY(i);
-      // t: 0 at the open (neck) ring, 1 at the crown
-      const t = THREE.MathUtils.clamp((y + 0.30) / 0.75, 0, 1);
-      const lean = Math.pow(t, 1.5) * 0.12;
-      hp.setZ(i, hp.getZ(i) + lean);
+      const x0 = hp.getX(i);
+      const y0 = hp.getY(i);
+      const z0 = hp.getZ(i);
+      // t: 0 at the lower rim, 1 at the crown
+      const t = THREE.MathUtils.clamp((y0 + 0.30) / 0.75, 0, 1);
+
+      // ---- crown leans backward ----
+      let nz = z0 + Math.pow(t, 1.5) * 0.10;
+      let ny = y0;
+
+      // ---- face opening: lift the lower-front rim up to brow level ----
+      // phi from the front (-Z): 0 at front, ±π/2 at sides, ±π at back
+      const phiFromFront = Math.atan2(x0, -nz);
+      const frontness = Math.max(0, Math.cos(phiFromFront));
+      const browY = 0.18;             // hood-local brow level (just above eyes)
+      const wantedLift = Math.max(0, browY - y0);
+      ny = y0 + wantedLift * Math.pow(frontness, 1.6);
+
+      // ---- weathered jitter (less near the crown so the lift reads clean) ----
       const j = (Math.sin(i * 7.1) + Math.cos(i * 13.3)) * 0.5;
-      hp.setX(i, hp.getX(i) + j * 0.014 * (0.4 + 0.6 * (1.0 - t)));
-      hp.setZ(i, hp.getZ(i) + j * 0.014 * (0.4 + 0.6 * (1.0 - t)));
+      const jit = j * 0.012 * (0.4 + 0.6 * (1.0 - t));
+      const nx = x0 + jit;
+      nz = nz + jit;
+
+      hp.setX(i, nx);
+      hp.setY(i, ny);
+      hp.setZ(i, nz);
     }
     hp.needsUpdate = true;
     hoodGeo.computeVertexNormals();
@@ -183,19 +202,26 @@ export class Player {
     this.hood = hood;
     this.body.add(hood);
 
-    // Hood interior void: a small dark mass inside the hood opening so
-    // the eyes read as glowing-in-shadow rather than floating in space.
-    const voidGeo = new THREE.SphereGeometry(0.17, 12, 8);
-    voidGeo.scale(1.0, 1.08, 0.85);
-    const voidMat = new THREE.MeshStandardMaterial({
-      color: 0x080403,
-      roughness: 1.0,
+    // The head/face — visible through the open front of the hood. Low-poly
+    // faceted form to match the rest of the character's geometric style,
+    // warm muted skin tone with a touch of emissive so it reads even in
+    // the dim pre-dawn light.
+    const headGeo = new THREE.IcosahedronGeometry(0.15, 1);
+    headGeo.scale(1.0, 1.12, 0.95);
+    const headMat = new THREE.MeshStandardMaterial({
+      color: 0x6e4838,
+      roughness: 0.85,
       metalness: 0.0,
+      emissive: 0x2a1408,
+      emissiveIntensity: 0.35,
     });
-    const voidMesh = new THREE.Mesh(voidGeo, voidMat);
-    voidMesh.position.set(0, 1.62, 0.02);
-    this.body.add(voidMesh);
-    this.hoodVoid = voidMesh;
+    const head = new THREE.Mesh(headGeo, headMat);
+    head.castShadow = true;
+    head.position.set(0, 1.60, -0.02);
+    this.body.add(head);
+    // keep the legacy name so the rest of the code (bob updates, etc.)
+    // continues to work without a rename
+    this.hoodVoid = head;
   }
 
   _buildHoodEmber() {
@@ -233,9 +259,9 @@ export class Player {
 
     this.eyeL = new THREE.Mesh(eyeGeo, eyeMat);
     this.eyeR = new THREE.Mesh(eyeGeo.clone(), eyeMat);
-    // inside the hood, peeking out of the front opening
-    this.eyeL.position.set(-0.065, 1.64, -0.14);
-    this.eyeR.position.set(0.065, 1.64, -0.14);
+    // sit on the front of the visible face, just below brow level
+    this.eyeL.position.set(-0.058, 1.64, -0.155);
+    this.eyeR.position.set(0.058, 1.64, -0.155);
     this.body.add(this.eyeL);
     this.body.add(this.eyeR);
   }
@@ -246,12 +272,17 @@ export class Player {
    * shoulder anchor, integrated each frame with gravity + wind.
    * --------------------------------------------------------- */
   _buildTrailingCape(scene) {
+    // Less rectangular: pinch the pin row toward the centre and leave the
+    // outer columns dangling, so the shoulders drape naturally and the
+    // cape reads as a relaxed cape rather than a flat sheet.
     this.trailingCape = new Cloak({
-      width: 1.05,
-      height: 1.55,
-      cols: 11,
-      rows: 13,
+      width: 1.10,
+      height: 1.60,
+      cols: 13,
+      rows: 14,
       anchor: this.shoulderAnchor,
+      pinCols: 5,        // pin only 5 central columns (out of 13)
+      pinScale: 0.42,    // pinned region spans ~42% of the cape width
     });
     scene.add(this.trailingCape.mesh);
   }
@@ -456,8 +487,9 @@ export class Player {
     this.body.add(halo);
     this.chestHalo = halo;
 
-    // point light
-    const light = new THREE.PointLight(0xffc890, 1.2, 5.5, 1.6);
+    // point light — pre-dawn: keep it subtle, just a soft glow on the
+    // body itself rather than a beacon that lights the world.
+    const light = new THREE.PointLight(0xffc890, 0.45, 2.6, 1.6);
     light.position.copy(core.position);
     this.body.add(light);
     this.chestLight = light;
@@ -641,6 +673,177 @@ export class Player {
     this.body.add(shard);
 
     this.chestFragments = [flankL, flankR, shard];
+  }
+
+  _buildHeldLantern() {
+    // A small lantern carried at the player's right side. Unlit by default
+    // (dim glass, no point light). Lights up when the trail flame is taken.
+    // Visually echoes the shrine lantern so the "transfer" reads cleanly.
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x3a2618,
+      roughness: 0.65,
+      metalness: 0.35,
+    });
+
+    // pivot group hanging from the right hand — child of body so it
+    // follows yaw / lean / flip naturally. The pivot itself is the hand
+    // position; the lantern hangs below it from a short chain so it can
+    // dangle/swing as a pendulum.
+    const armPivot = new THREE.Group();
+    // hand held out forward and to the right of the body
+    armPivot.position.set(0.46, 1.18, -0.32);
+    this.body.add(armPivot);
+    this.heldLanternArm = armPivot;
+
+    // the swinging part — chain + lantern body. Pivots at y=0 (hand) and
+    // hangs downward; a damped pendulum so jolts and turns make it dangle.
+    const lantern = new THREE.Group();
+    armPivot.add(lantern);
+    this.heldLantern = lantern;
+
+    // pendulum runtime state
+    this._lanternPendX = 0;     // pitch (around local X)
+    this._lanternPendZ = 0;     // roll (around local Z)
+    this._lanternPendVX = 0;
+    this._lanternPendVZ = 0;
+    this._lanternPrevWorldVel = new THREE.Vector3();
+
+    // small handle ring where the chain meets the hand
+    const handle = new THREE.Mesh(
+      new THREE.TorusGeometry(0.055, 0.011, 6, 14),
+      ironMat,
+    );
+    handle.rotation.x = Math.PI / 2;
+    handle.position.y = -0.02;
+    lantern.add(handle);
+
+    // short chain links hanging from the hand down to the cage
+    for (let i = 0; i < 3; i++) {
+      const link = new THREE.Mesh(
+        new THREE.TorusGeometry(0.018, 0.0045, 5, 10),
+        ironMat,
+      );
+      link.position.y = -0.06 - i * 0.035;
+      link.rotation.x = (i % 2) * Math.PI / 2;
+      lantern.add(link);
+    }
+
+    // glass body — bigger so it reads as a real lantern in the hand
+    const glassGeo = new THREE.OctahedronGeometry(0.13, 0);
+    glassGeo.scale(1.0, 1.4, 1.0);
+    const glassMat = new THREE.MeshBasicMaterial({
+      color: 0x6a5a44,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    const glass = new THREE.Mesh(glassGeo, glassMat);
+    glass.position.y = -0.27;
+    lantern.add(glass);
+    this.heldLanternGlass = glass;
+    this.heldLanternGlassMat = glassMat;
+
+    // iron cage — 4 verticals
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const cage = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.006, 0.006, 0.34, 4),
+        ironMat,
+      );
+      cage.position.set(
+        Math.cos(a) * 0.115,
+        glass.position.y,
+        Math.sin(a) * 0.115,
+      );
+      lantern.add(cage);
+    }
+    // top + bottom cage rings
+    for (const dy of [-0.17, 0.17]) {
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.115, 0.009, 5, 14),
+        ironMat,
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = glass.position.y + dy;
+      lantern.add(ring);
+    }
+
+    // hot core
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xfff1c4,
+      transparent: true,
+      opacity: 0.0,
+    });
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.045, 10, 6),
+      coreMat,
+    );
+    core.position.copy(glass.position);
+    lantern.add(core);
+    this.heldLanternCore = core;
+    this.heldLanternCoreMat = coreMat;
+
+    // halo
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0xffb070,
+      transparent: true,
+      opacity: 0.0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const halo = new THREE.Mesh(
+      new THREE.SphereGeometry(0.15, 10, 6),
+      haloMat,
+    );
+    halo.position.copy(glass.position);
+    lantern.add(halo);
+    this.heldLanternHaloMat = haloMat;
+
+    // point light — off until lit. Once lit, this becomes the player's
+    // primary light source in the pre-dawn dark, so it has a generous
+    // range and softer falloff than the chest glow.
+    const lanternLight = new THREE.PointLight(0xffc890, 0.0, 26, 1.25);
+    lanternLight.position.copy(glass.position);
+    lanternLight.castShadow = false;
+    lantern.add(lanternLight);
+    this.heldLanternLight = lanternLight;
+
+    // public flame strength — main.js drives this 0..1 during the take
+    this.heldLanternFlame = 0;
+  }
+
+  _buildLanternArm() {
+    // A dark, tapered arm that connects the right shoulder to wherever the
+    // lantern is held. Each frame we orient + stretch this single cylinder
+    // so it always points at the held-lantern hand pivot, giving the
+    // illusion that the player is actually carrying the lantern.
+    const armMat = new THREE.MeshStandardMaterial({
+      color: 0x150a06,
+      roughness: 0.92,
+      metalness: 0.0,
+      emissive: 0x0c0402,
+      emissiveIntensity: 0.4,
+    });
+    // Cylinder along +Y, default 1 unit tall, centred at origin.
+    // Translate so the TOP is at local y=0 (shoulder) and BOTTOM is at y=-1.
+    const armGeo = new THREE.CylinderGeometry(0.058, 0.040, 1.0, 7, 1);
+    armGeo.translate(0, -0.5, 0);
+
+    const arm = new THREE.Mesh(armGeo, armMat);
+    arm.castShadow = true;
+    // shoulder anchor (body-local), tucked just inside the cloak rim
+    this._lanternArmShoulder = new THREE.Vector3(0.22, 1.34, -0.05);
+    arm.position.copy(this._lanternArmShoulder);
+    this.body.add(arm);
+    this.heldLanternArmMesh = arm;
+
+    // a small "hand" knob at the bottom so the arm doesn't just terminate
+    // mid-air at the lantern's chain ring
+    const handGeo = new THREE.SphereGeometry(0.045, 10, 8);
+    const hand = new THREE.Mesh(handGeo, armMat);
+    hand.castShadow = true;
+    this.body.add(hand);
+    this.heldLanternHandKnob = hand;
   }
 
   _buildRibbons() {
@@ -968,7 +1171,7 @@ export class Player {
     this.body.scale.set(compXZ, compY, compXZ);
 
     this.hood.position.y = 1.45 + bob;
-    if (this.hoodVoid) this.hoodVoid.position.y = 1.62 + bob;
+    if (this.hoodVoid) this.hoodVoid.position.y = 1.60 + bob;
     if (this.hoodEmber) this.hoodEmber.position.y = 1.62 + bob;
     if (this.hoodWisp) this.hoodWisp.position.y = 1.62 + bob;
     this.shoulderAnchor.position.y = 1.3 + bob;
@@ -1039,7 +1242,7 @@ export class Player {
     this.chestCore.scale.setScalar(coreScale);
     this.chestHalo.scale.setScalar(0.95 + pulse * 0.4);
     this.chestHalo.material.opacity = 0.12 + pulse * 0.16;
-    this.chestLight.intensity = 0.9 + pulse * 0.9 + this.movingBlend * 0.4;
+    this.chestLight.intensity = 0.30 + pulse * 0.35 + this.movingBlend * 0.15;
 
     // eyes: very subtle flicker, tied to chest pulse
     if (this.eyeL) {
@@ -1049,6 +1252,107 @@ export class Player {
       const eyeScale = 0.94 + pulse * 0.10;
       this.eyeL.scale.setScalar(eyeScale);
       this.eyeR.scale.setScalar(eyeScale);
+    }
+
+    // held lantern: pendulum dangle driven by body acceleration + walk bob,
+    // with optional "raise" pose where the arm lifts the lantern overhead.
+    if (this.heldLantern) {
+      // ---- arm pose: rest vs raised (driven externally by lanternRaise) ----
+      if (this.lanternRaise === undefined) this.lanternRaise = 0;
+      if (this._lanternRaiseSmoothed === undefined) this._lanternRaiseSmoothed = 0;
+      this._lanternRaiseSmoothed = THREE.MathUtils.damp(
+        this._lanternRaiseSmoothed, this.lanternRaise, 4.0, dt,
+      );
+      const raise = this._lanternRaiseSmoothed;
+      // rest: held out forward (0.46, 1.18, -0.32). Raised: lifted high
+      // and slightly back, like an arm extended overhead.
+      const restX = 0.46, restY = 1.18, restZ = -0.32;
+      const upX  = 0.18, upY  = 2.05, upZ  = 0.05;
+      this.heldLanternArm.position.set(
+        THREE.MathUtils.lerp(restX, upX, raise),
+        THREE.MathUtils.lerp(restY, upY, raise) + bob * (1 - raise * 0.6),
+        THREE.MathUtils.lerp(restZ, upZ, raise),
+      );
+      // rotate the arm pivot back as it raises (so the lantern hangs over
+      // the head, not in front of the chest)
+      this.heldLanternArm.rotation.x = raise * -0.55;
+
+      // ---- pendulum forces from body acceleration ----
+      // Compare current world velocity to last frame's to get acceleration,
+      // express it in the body's local frame, and apply as an angular impulse.
+      const cs = Math.cos(this.bodyYaw);
+      const sn = Math.sin(this.bodyYaw);
+      const ax = (this.velocity.x - this._lanternPrevWorldVel.x) / Math.max(dt, 1e-4);
+      const ay = (this.velocity.y - this._lanternPrevWorldVel.y) / Math.max(dt, 1e-4);
+      const az = (this.velocity.z - this._lanternPrevWorldVel.z) / Math.max(dt, 1e-4);
+      this._lanternPrevWorldVel.set(this.velocity.x, this.velocity.y, this.velocity.z);
+      // local-axis acceleration: x = body-right, z = body-forward (-Z)
+      const laxX =  cs * ax + sn * az;
+      const laxZ = -sn * ax + cs * az;
+
+      // pendulum equations: angle accel = -k*angle - c*vel + impulse
+      // Forward acceleration tilts the lantern backward (pendulum lags).
+      // Sideways acceleration tilts it sideways. Vertical acceleration
+      // (jumps/landings) loosens it briefly.
+      const STIFF = 28.0, DAMP = 4.6, IMP = 0.0024;
+      this._lanternPendVX += (-STIFF * this._lanternPendX - DAMP * this._lanternPendVX) * dt;
+      this._lanternPendVZ += (-STIFF * this._lanternPendZ - DAMP * this._lanternPendVZ) * dt;
+      // forward accel -> rotate +X (pitch back); right accel -> rotate -Z
+      this._lanternPendVX += laxZ * IMP;
+      this._lanternPendVZ -= laxX * IMP;
+      // vertical jolt: brief upward kick scrambles both axes a touch
+      const jolt = ay * 0.0008;
+      this._lanternPendVX += Math.sin(t * 7.3) * jolt;
+      this._lanternPendVZ += Math.cos(t * 6.1) * jolt;
+      this._lanternPendX += this._lanternPendVX * dt;
+      this._lanternPendZ += this._lanternPendVZ * dt;
+      // walk-bob driver — a small steady oscillation while moving
+      const walkSwingX = Math.sin(this.walkPhase) * 0.08 * this.movingBlend;
+      const walkSwingZ = Math.cos(this.walkPhase * 0.5) * 0.04 * this.movingBlend;
+      // damp pendulum more aggressively when arm is raised (lantern held high)
+      const raiseDamp = THREE.MathUtils.lerp(1.0, 0.35, raise);
+      this.heldLantern.rotation.x = (this._lanternPendX + walkSwingX) * raiseDamp;
+      this.heldLantern.rotation.z = (this._lanternPendZ + walkSwingZ) * raiseDamp;
+
+      // ---- arm: orient + stretch the cylinder so it spans shoulder→hand ----
+      if (this.heldLanternArmMesh) {
+        const shoulder = this._lanternArmShoulder;
+        // body-local hand position (where the lantern hangs from)
+        const hx = this.heldLanternArm.position.x;
+        const hy = this.heldLanternArm.position.y;
+        const hz = this.heldLanternArm.position.z;
+        const dx = hx - shoulder.x;
+        const dy = hy - shoulder.y;
+        const dz = hz - shoulder.z;
+        const len = Math.max(0.05, Math.hypot(dx, dy, dz));
+        TMP_V1.set(dx / len, dy / len, dz / len);
+        // cylinder, after translate, has its tip at local -Y. Rotate so
+        // local -Y aligns with the shoulder→hand direction.
+        TMP_V2.set(0, -1, 0);
+        TMP_Q.setFromUnitVectors(TMP_V2, TMP_V1);
+        this.heldLanternArmMesh.quaternion.copy(TMP_Q);
+        this.heldLanternArmMesh.position.copy(shoulder);
+        this.heldLanternArmMesh.scale.set(1, len, 1);
+
+        // hand knob: park it right at the lantern hand pivot
+        if (this.heldLanternHandKnob) {
+          this.heldLanternHandKnob.position.set(hx, hy, hz);
+        }
+      }
+
+      // ---- lit visuals ----
+      const f = THREE.MathUtils.clamp(this.heldLanternFlame, 0, 1);
+      this.heldLanternGlassMat.color.setRGB(
+        0.42 + 0.62 * f,
+        0.36 + 0.55 * f,
+        0.28 + 0.10 * f,
+      );
+      this.heldLanternGlassMat.opacity = 0.55 + 0.30 * f;
+      this.heldLanternCoreMat.opacity = f * 0.95;
+      this.heldLanternHaloMat.opacity = f * (0.55 + Math.sin(t * 1.4) * 0.10);
+      this.heldLanternLight.intensity = f * (3.6 + Math.sin(t * 1.2) * 0.30);
+      const ls = 1.0 + Math.sin(t * 1.6) * 0.05 * f;
+      this.heldLanternCore.scale.setScalar(ls);
     }
 
     // chest fragments: slow idle rotation

@@ -203,19 +203,14 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
 
   /* -----------------------------------------------------------
    * Floating stone fragments — drifting silhouettes near cliff edge.
+   *
+   *   Two shared geometries (deformed icos) re-used by every fragment;
+   *   per-instance scale/rotation gives them visual variety without 28
+   *   unique BufferGeometries on the GPU.
    * --------------------------------------------------------- */
   const fragments = [];
-  const FRAG_COUNT = 28;
-  for (let i = 0; i < FRAG_COUNT; i++) {
-    const ang = Math.random() * Math.PI * 2;
-    const r = 90 + Math.random() * 110;
-    const x = Math.cos(ang) * r;
-    const z = Math.sin(ang) * r;
-    const y = -6 - Math.random() * 24;
-    const sx = 0.6 + Math.random() * 1.8;
-    const sy = 0.4 + Math.random() * 0.9;
-    const sz = 0.6 + Math.random() * 1.8;
-    // angular geometry — IcosahedronGeometry deformed for craggy look
+  const FRAG_GEOS = [];
+  for (let g = 0; g < 3; g++) {
     const geo = new THREE.IcosahedronGeometry(1, 0);
     const pa = geo.attributes.position;
     for (let k = 0; k < pa.count; k++) {
@@ -225,11 +220,26 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
     }
     pa.needsUpdate = true;
     geo.computeVertexNormals();
+    FRAG_GEOS.push(geo);
+  }
+  const FRAG_COUNT = 18;
+  for (let i = 0; i < FRAG_COUNT; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const r = 90 + Math.random() * 110;
+    const x = Math.cos(ang) * r;
+    const z = Math.sin(ang) * r;
+    const y = -6 - Math.random() * 24;
+    const sx = 0.6 + Math.random() * 1.8;
+    const sy = 0.4 + Math.random() * 0.9;
+    const sz = 0.6 + Math.random() * 1.8;
 
-    const m = new THREE.Mesh(geo, Math.random() < 0.5 ? STONE_LIGHT : STONE_DARK);
+    const geo = FRAG_GEOS[i % FRAG_GEOS.length];
+    const m = new THREE.Mesh(geo, (i & 1) ? STONE_LIGHT : STONE_DARK);
     m.position.set(x, y, z);
     m.scale.set(sx, sy, sz);
     m.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+    m.castShadow = false;
+    m.receiveShadow = false;
     m.userData = {
       bobY: y,
       bobPhase: Math.random() * Math.PI * 2,
@@ -280,6 +290,16 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
   // pads contribute colliders so the player can walk on them once revealed
   for (const c of windBridge.colliders) colliders.push(c);
 
+  /* -----------------------------------------------------------
+   * Sky island — the floating destination at the top of the wind
+   *   bridge. Round disc with a tapered rocky underside, a small
+   *   lighthouse tower, and ancient glowing runes inscribed on the
+   *   top surface. Position is the last wind-bridge pad's target.
+   * --------------------------------------------------------- */
+  const SKY_ISLAND_POS = { x: 0, y: 42, z: -240 };
+  const skyIsland = buildSkyIsland(SKY_ISLAND_POS, { STONE_LIGHT, STONE_DARK });
+  group.add(skyIsland.group);
+
   // ---- restoration drivers ----
   const state = {
     restoring: 0,       // 0..1 — eased
@@ -304,6 +324,7 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
     fragments,
     windstones,
     windBridge,
+    skyIsland,
     state,
     setRestoring,
     setBridgeReformProgress,
@@ -314,7 +335,7 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
 /* -----------------------------------------------------------
  * Per-frame update — pure animation, no allocation.
  * --------------------------------------------------------- */
-export function updateCliffs(cliffs, dt, t) {
+export function updateCliffs(cliffs, dt, t, player, audio) {
   const r = cliffs.state.restoring;
 
   // ---- windmills: ramp current speed toward target * restoration ----
@@ -339,15 +360,23 @@ export function updateCliffs(cliffs, dt, t) {
   }
 
   // ---- bridges: plank fade-in tied to bridgeReform ----
+  // animate the shared missingMat once per bridge (uniforms shared across
+  // all missing planks on that bridge → one shader, one upload)
   const reform = cliffs.state.bridgeReform;
   for (const br of cliffs.bridges) {
+    const sharedMat = br.group.userData.missingMat;
+    if (sharedMat) {
+      // average rebuild progress, used for the shared opacity/emissive
+      const local = THREE.MathUtils.clamp(reform, 0, 1);
+      sharedMat.emissiveIntensity = (1 - local) * 0.8;
+      sharedMat.opacity = 0.4 + 0.6 * local;
+    }
+    // per-plank scale.y stagger gives each plank its own rebuild timing
+    // without any per-plank material work
     for (const p of br.planks) {
       if (!p.missing) continue;
-      // each missing plank rebuilds at a staggered time based on its index
       const local = THREE.MathUtils.clamp(reform * 1.6 - p.delay, 0, 1);
       p.mesh.scale.y = local;
-      p.mesh.material.emissiveIntensity = (1 - local) * 0.8;
-      p.mesh.material.opacity = 0.4 + 0.6 * local;
       p.mesh.visible = local > 0.02;
       if (local >= 0.999 && !p.colliderEnabled) {
         p.colliderEnabled = true;
@@ -369,15 +398,63 @@ export function updateCliffs(cliffs, dt, t) {
   const wb = cliffs.windBridge;
   if (wb) {
     const wbT = cliffs.state.windBridge;
+    const pp = player?.position;
+    // spring constants — under-damped so the pad drops then bobs back
+    // up past its rest height (gives the "floating platform" feel)
+    const SPRING_K = 26;
+    const SPRING_C = 3.0;
+
     for (let i = 0; i < wb.pads.length; i++) {
       const pad = wb.pads[i];
-      // staggered fade-in: each pad starts a moment after the last
-      const local = THREE.MathUtils.clamp(wbT * 1.4 - i * 0.07, 0, 1);
+      // staggered fade-in: each pad starts a moment after the last.
+      // The 2.0 multiplier guarantees every pad reaches eased=1 by the
+      // time wbT saturates so the late pads are fully walkable, not
+      // half-scale stones.
+      const local = THREE.MathUtils.clamp(wbT * 2.0 - i * 0.07, 0, 1);
       const eased = local * local * (3 - 2 * local);
       pad.mesh.scale.setScalar(eased);
       pad.mat.opacity = 0.55 + eased * 0.4;
-      pad.mat.emissiveIntensity = 0.6 + eased * 1.0;
-      pad.mesh.position.y = pad.targetY + Math.sin(t * 0.7 + pad.bobPhase) * 0.12;
+
+      // ---- step-on reaction + lantern proximity ----
+      let lanternProx = 0;
+      if (pp && eased > 0.85) {
+        const dxp = pp.x - pad.mesh.position.x;
+        const dzp = pp.z - pad.mesh.position.z;
+        const dyp = pp.y - pad.targetY;
+        const dxz = Math.hypot(dxp, dzp);
+        // lantern glow falls off with overall distance to the pad
+        const dist = Math.hypot(dxz, dyp);
+        lanternProx = Math.max(0, 1 - dist / 4.5);
+        // step-on: player feet within pad disc, just above its surface
+        if (dxz < pad.colliderHalfW + 0.4 && dyp > -0.2 && dyp < 1.6) {
+          if (!pad.played) {
+            pad.played = true;
+            pad.pressedVel -= 3.2;     // downward kick (drops the pad)
+            audio?.playRuinChime?.(7 + i * 4);
+          }
+          pad.lit = Math.min(1, pad.lit + dt * 4.0);
+        }
+      }
+
+      // spring physics for the press: under-damped so it overshoots
+      // upward like a floating platform settling back into place
+      const accel = -SPRING_K * pad.pressed - SPRING_C * pad.pressedVel;
+      pad.pressedVel += accel * dt;
+      pad.pressed   += pad.pressedVel * dt;
+
+      // emissive composes a dim base + lit-up boost + lantern proximity glow
+      const baseEm  = 0.12;
+      const litEm   = pad.lit * 1.2;
+      const lampEm  = lanternProx * 0.7;
+      pad.mat.emissiveIntensity = (baseEm + litEm + lampEm) * (0.35 + eased * 0.65);
+
+      // pad position: gentle bob + spring offset
+      const bob = Math.sin(t * 0.7 + pad.bobPhase) * 0.12;
+      const padY = pad.targetY + bob + pad.pressed;
+      pad.mesh.position.y = padY;
+      // collider follows so the player rides the pad as it bobs/presses
+      if (pad.colliderRef) pad.colliderRef.y = padY + 0.09;
+
       // toggle collider when fully present
       if (eased > 0.85 && !pad.colliderEnabled) {
         pad.colliderEnabled = true;
@@ -385,12 +462,30 @@ export function updateCliffs(cliffs, dt, t) {
         pad.colliderRef.halfD = pad.colliderHalfD;
       }
     }
-    // motes around bridge fade in too — driven by emissive so no per-frame
-    // material ops are needed beyond opacity
+    // motes share a single material — write opacity once, animate
+    // position/rotation per-mote (cheap)
+    if (wb.motes.length) {
+      wb.motes[0].material.opacity = cliffs.state.windBridge * 0.7;
+    }
     for (const mote of wb.motes) {
       mote.position.y = mote.baseY + Math.sin(t * 1.4 + mote.phase) * 0.3;
-      mote.material.opacity = 0.0 + cliffs.state.windBridge * 0.7;
       mote.rotation.y += dt * 0.4;
+    }
+  }
+
+  // ---- sky island runes: gentle out-of-phase pulse on each material ----
+  const si = cliffs.skyIsland;
+  if (si) {
+    for (let i = 0; i < si.runeMats.length; i++) {
+      const m = si.runeMats[i];
+      const base = m.userData.baseOpacity;
+      // each rune drifts on its own phase so the inscription "breathes"
+      const pulse = 0.78 + 0.22 * Math.sin(t * 0.55 + i * 0.7);
+      m.opacity = base * pulse;
+    }
+    if (si.haloMat) {
+      const base = si.haloMat.userData.baseOpacity;
+      si.haloMat.opacity = base * (0.85 + 0.15 * Math.sin(t * 0.9));
     }
   }
 }
@@ -407,10 +502,12 @@ function buildWindBridge({ getTerrainHeight }) {
   const colliders = [];
 
   // Start from just past the cliff edge (~z = -100) and ascend toward
-  // a destination island at (0, 60, -260). 14 pads, gently curved.
-  const PAD_COUNT = 14;
-  const startX = 0,    startY = -2,   startZ = -98;
-  const endX   = 0,    endY   = 60,   endZ   = -240;
+  // the sky island at (0, 42, -240). More pads, packed closer so the
+  // jumps are comfortable; final pad lands at the near edge of the
+  // island disc rather than its centre.
+  const PAD_COUNT = 24;
+  const startX = 0,    startY = -2,   startZ = -100;
+  const endX   = 0,    endY   = 42,   endZ   = -222;
 
   for (let i = 0; i < PAD_COUNT; i++) {
     const t = i / (PAD_COUNT - 1);
@@ -422,12 +519,14 @@ function buildWindBridge({ getTerrainHeight }) {
             + Math.sin(t * Math.PI * 4) * 0.8;
     const z = THREE.MathUtils.lerp(startZ, endZ, t);
 
-    // soft glowing pad geometry — circular slab with emissive top
-    const padGeo = new THREE.CylinderGeometry(1.1, 1.0, 0.18, 18, 1);
+    // soft glowing pad geometry — circular slab with emissive top.
+    // Starts dim ("not lit yet"); each pad lights up the first time the
+    // player steps on it. Bigger discs so jumping between them is forgiving.
+    const padGeo = new THREE.CylinderGeometry(2.1, 1.9, 0.22, 22, 1);
     const padMat = new THREE.MeshStandardMaterial({
       color: 0xfff0c4,
       emissive: 0xffd9a0,
-      emissiveIntensity: 0.6,
+      emissiveIntensity: 0.12,
       roughness: 0.55,
       transparent: true,
       opacity: 0.0,
@@ -440,9 +539,10 @@ function buildWindBridge({ getTerrainHeight }) {
     pad.receiveShadow = false;
     group.add(pad);
 
-    // collider — disabled until pad is fully present
-    const colliderHalfW = 1.0;
-    const colliderHalfD = 1.0;
+    // collider — disabled until pad is fully present. Sized to match the
+    // larger disc so the player doesn't slip off the visible edge.
+    const colliderHalfW = 1.9;
+    const colliderHalfD = 1.9;
     const colliderRef = {
       x, y: y + 0.09, z,
       halfW: 0.0001, halfD: 0.0001,    // disabled
@@ -459,47 +559,319 @@ function buildWindBridge({ getTerrainHeight }) {
       colliderEnabled: false,
       colliderHalfW,
       colliderHalfD,
+      // step-on reactivity: lit (0..1) ramps to 1 the first time the
+      // player stands on the pad. pressed (in metres) is a spring offset
+      // that briefly drops then bobs back up like a floating platform.
+      lit: 0,
+      pressed: 0,
+      pressedVel: 0,
+      played: false,
+      index: i,
     });
 
-    // ---- 3 small drifting motes around each pad for visual richness ----
-    for (let m = 0; m < 3; m++) {
-      const moteGeo = new THREE.OctahedronGeometry(0.14, 0);
-      const moteMat = new THREE.MeshBasicMaterial({
-        color: 0xfff0c4,
-        transparent: true,
-        opacity: 0.0,
-        depthWrite: false,
-      });
-      const mote = new THREE.Mesh(moteGeo, moteMat);
-      const ang = Math.random() * Math.PI * 2;
-      const r = 1.4 + Math.random() * 1.1;
-      mote.position.set(
-        x + Math.cos(ang) * r,
-        y + 0.6 + Math.random() * 0.7,
-        z + Math.sin(ang) * r,
-      );
-      mote.userData = {
-        baseY: mote.position.y,
-        phase: Math.random() * Math.PI * 2,
-      };
-      mote.baseY = mote.position.y;
-      mote.phase = Math.random() * Math.PI * 2;
-      group.add(mote);
-      motes.push(mote);
-    }
+  }
+  // ---- a few drifting motes scattered along the bridge for atmosphere.
+  // Shared geometry + shared material so the whole flock renders in one
+  // batch, instead of 42 unique mesh+material pairs.
+  const moteGeo = new THREE.OctahedronGeometry(0.14, 0);
+  const moteMat = new THREE.MeshBasicMaterial({
+    color: 0xfff0c4,
+    transparent: true,
+    opacity: 0.0,
+    depthWrite: false,
+  });
+  const MOTE_COUNT = 14;
+  for (let m = 0; m < MOTE_COUNT; m++) {
+    const i = Math.min(PAD_COUNT - 1, Math.floor((m / MOTE_COUNT) * PAD_COUNT));
+    const pad = pads[i];
+    const px = pad.mesh.position.x;
+    const py = pad.targetY;
+    const pz = pad.mesh.position.z;
+    const ang = Math.random() * Math.PI * 2;
+    const r = 1.4 + Math.random() * 1.1;
+    const mote = new THREE.Mesh(moteGeo, moteMat);
+    mote.position.set(
+      px + Math.cos(ang) * r,
+      py + 0.6 + Math.random() * 0.7,
+      pz + Math.sin(ang) * r,
+    );
+    mote.baseY = mote.position.y;
+    mote.phase = Math.random() * Math.PI * 2;
+    group.add(mote);
+    motes.push(mote);
   }
 
   return { group, pads, motes, colliders };
 }
 
 /* -----------------------------------------------------------
+ * Sky island — the floating circular destination at the top of
+ *   the wind bridge. A grass-topped disc with a rocky tapered
+ *   underside, ringed by a few jagged stones, with a stone
+ *   lighthouse tower at its centre. Ancient runes are inscribed
+ *   on the top surface in vibrant colors that pulse gently.
+ * --------------------------------------------------------- */
+function buildSkyIsland(pos, mats) {
+  const { STONE_LIGHT, STONE_DARK } = mats;
+  const g = new THREE.Group();
+  g.position.set(pos.x, pos.y, pos.z);
+
+  const ISLAND_R   = 18;
+  const TOP_THICK  = 1.0;
+
+  // grass-topped disc
+  const topMat = new THREE.MeshStandardMaterial({
+    color: 0x4a4a32,
+    roughness: 0.9,
+  });
+  const top = new THREE.Mesh(
+    new THREE.CylinderGeometry(ISLAND_R, ISLAND_R - 0.6, TOP_THICK, 36, 1),
+    topMat,
+  );
+  top.position.y = 0;
+  top.castShadow = true;
+  top.receiveShadow = true;
+  g.add(top);
+
+  // rocky tapered underside — cone with apex pointing down
+  const under = new THREE.Mesh(
+    new THREE.ConeGeometry(ISLAND_R - 0.8, 22, 28, 4, true),
+    STONE_DARK,
+  );
+  under.rotation.x = Math.PI;       // flip so the point faces down
+  under.position.y = -TOP_THICK / 2 - 11;
+  under.castShadow = true;
+  g.add(under);
+
+  // a ring of jagged boulders around the equator for silhouette
+  const BOULDER_GEO = new THREE.IcosahedronGeometry(1.0, 0);
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+    const r = ISLAND_R - 0.8 + (Math.random() - 0.3) * 1.2;
+    const stone = new THREE.Mesh(
+      BOULDER_GEO,
+      i & 1 ? STONE_LIGHT : STONE_DARK,
+    );
+    stone.position.set(
+      Math.cos(a) * r,
+      -1.2 - Math.random() * 1.0,
+      Math.sin(a) * r,
+    );
+    stone.scale.set(
+      0.9 + Math.random() * 1.6,
+      1.2 + Math.random() * 1.6,
+      0.9 + Math.random() * 1.6,
+    );
+    stone.rotation.set(
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+    );
+    stone.castShadow = true;
+    g.add(stone);
+  }
+
+  /* ---- ancient runes: rings + spokes + glyph dots, additive emissive,
+   * vibrant but capped to ~0.55 opacity so they catch the eye without
+   * blowing out the dim pre-dawn palette. */
+  const RUNE_COLORS = [0x4ad8ff, 0xff6acc, 0xffd24a, 0x9aff86];
+  const runeMats = [];
+  function makeRuneMat(color, opacity) {
+    const m = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+    });
+    m.userData.baseOpacity = opacity;
+    runeMats.push(m);
+    return m;
+  }
+
+  const RUNE_Y = TOP_THICK / 2 + 0.025;
+
+  // three concentric rings, each its own color
+  const RING_RADII = [13.5, 9.0, 5.0];
+  for (let i = 0; i < RING_RADII.length; i++) {
+    const ringR = RING_RADII[i];
+    const ringGeo = new THREE.RingGeometry(ringR - 0.20, ringR, 96);
+    ringGeo.rotateX(-Math.PI / 2);
+    const ring = new THREE.Mesh(
+      ringGeo,
+      makeRuneMat(RUNE_COLORS[i % RUNE_COLORS.length], 0.55),
+    );
+    ring.position.y = RUNE_Y + i * 0.005;
+    g.add(ring);
+  }
+
+  // 8 radial spokes between the inner and outer rings
+  const SPOKES = 8;
+  for (let i = 0; i < SPOKES; i++) {
+    const a = (i / SPOKES) * Math.PI * 2;
+    const inner = 5.2;
+    const outer = 8.8;
+    const len = outer - inner;
+    const spokeGeo = new THREE.PlaneGeometry(0.22, len);
+    spokeGeo.rotateX(-Math.PI / 2);
+    spokeGeo.translate(0, 0, inner + len / 2);
+    const spoke = new THREE.Mesh(
+      spokeGeo,
+      makeRuneMat(RUNE_COLORS[i % RUNE_COLORS.length], 0.45),
+    );
+    spoke.rotation.y = a;
+    spoke.position.y = RUNE_Y + 0.005;
+    g.add(spoke);
+  }
+
+  // glyph dots scattered along a mid radius — irregular spacing reads
+  // as written symbols rather than a regular pattern
+  for (let i = 0; i < 20; i++) {
+    const a = (i / 20) * Math.PI * 2 + Math.sin(i * 1.31) * 0.12;
+    const r = 11.2 + Math.sin(i * 2.7) * 0.4;
+    const size = 0.18 + Math.random() * 0.18;
+    const dotGeo = new THREE.CircleGeometry(size, 8);
+    dotGeo.rotateX(-Math.PI / 2);
+    const dot = new THREE.Mesh(
+      dotGeo,
+      makeRuneMat(RUNE_COLORS[i % RUNE_COLORS.length], 0.5),
+    );
+    dot.position.set(Math.cos(a) * r, RUNE_Y + 0.01, Math.sin(a) * r);
+    g.add(dot);
+  }
+
+  // central emblem — a small bright disc at the foot of the lighthouse
+  const emblemGeo = new THREE.CircleGeometry(1.4, 24);
+  emblemGeo.rotateX(-Math.PI / 2);
+  const emblem = new THREE.Mesh(emblemGeo, makeRuneMat(0xfff0c4, 0.5));
+  emblem.position.y = RUNE_Y + 0.015;
+  g.add(emblem);
+
+  /* ---- lighthouse tower at the centre ---- */
+  const tower = new THREE.Group();
+  tower.position.y = TOP_THICK / 2;
+  g.add(tower);
+
+  // base plinth
+  const plinth = new THREE.Mesh(
+    new THREE.CylinderGeometry(2.4, 3.0, 1.0, 16),
+    STONE_LIGHT,
+  );
+  plinth.position.y = 0.5;
+  plinth.castShadow = true;
+  plinth.receiveShadow = true;
+  tower.add(plinth);
+
+  // tapered shaft
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.4, 2.2, 8.5, 18),
+    STONE_LIGHT,
+  );
+  shaft.position.y = 5.25;
+  shaft.castShadow = true;
+  tower.add(shaft);
+
+  // gallery ring (a wider band where the lantern room sits)
+  const gallery = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.85, 1.85, 0.5, 18),
+    STONE_DARK,
+  );
+  gallery.position.y = 9.75;
+  gallery.castShadow = true;
+  tower.add(gallery);
+
+  // lantern room frame — open cylinder, shows the lamp inside
+  const lanternRoom = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.3, 1.3, 1.6, 8, 1, true),
+    new THREE.MeshStandardMaterial({
+      color: 0x4a3826,
+      roughness: 0.85,
+      side: THREE.DoubleSide,
+    }),
+  );
+  lanternRoom.position.y = 10.8;
+  tower.add(lanternRoom);
+
+  // glowing lamp
+  const lampMat = new THREE.MeshBasicMaterial({
+    color: 0xffe9b8,
+    transparent: true,
+    opacity: 0.95,
+    fog: false,
+  });
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.85, 16, 12), lampMat);
+  lamp.position.y = 10.8;
+  tower.add(lamp);
+
+  // soft halo around the lamp (additive)
+  const haloMat = new THREE.MeshBasicMaterial({
+    color: 0xfff0c4,
+    transparent: true,
+    opacity: 0.22,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    fog: false,
+  });
+  haloMat.userData.baseOpacity = 0.22;
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(1.55, 16, 12), haloMat);
+  halo.position.y = 10.8;
+  tower.add(halo);
+
+  // conical roof
+  const roof = new THREE.Mesh(
+    new THREE.ConeGeometry(1.55, 1.7, 10),
+    STONE_DARK,
+  );
+  roof.position.y = 12.45;
+  roof.castShadow = true;
+  tower.add(roof);
+
+  // small finial on top
+  const finial = new THREE.Mesh(
+    new THREE.SphereGeometry(0.16, 8, 6),
+    new THREE.MeshStandardMaterial({
+      color: 0xffd28a,
+      emissive: 0xffd28a,
+      emissiveIntensity: 0.45,
+      roughness: 0.6,
+    }),
+  );
+  finial.position.y = 13.45;
+  tower.add(finial);
+
+  return { group: g, runeMats, haloMat };
+}
+
+/* -----------------------------------------------------------
  * Bridge builder — internal helper.
  * --------------------------------------------------------- */
+// Shared materials for plank rebuild — declared at module scope so all
+// bridges share the same compiled shader. The "missing" material is
+// still per-bridge because emissiveIntensity is animated; we update it
+// once globally each frame from updateCliffs.
+const _PLANK_PRESENT_MAT = new THREE.MeshStandardMaterial({
+  color: 0x6a4a2a,
+  roughness: 0.85,
+});
+
 function buildBridge(spec, mats) {
   const { getTerrainHeight, WOOD_MAT, WOOD_DARK, ROPE_MAT } = mats;
   const group = new THREE.Group();
   const planks = [];
   const colliders = [];
+
+  // One missing-plank material shared across this bridge's missing planks.
+  // Animation for the rebuild glow modulates this shared material's
+  // opacity / emissiveIntensity, so all missing planks rebuild in sync.
+  const missingMat = new THREE.MeshStandardMaterial({
+    color: 0x6a4a2a,
+    roughness: 0.85,
+    transparent: true,
+    opacity: 0.0,
+    emissive: 0xffd9a0,
+    emissiveIntensity: 0.0,
+  });
 
   const ax = spec.from.x, az = spec.from.z;
   const bx = spec.to.x,   bz = spec.to.z;
@@ -526,17 +898,9 @@ function buildBridge(spec, mats) {
     const py = THREE.MathUtils.lerp(ay, by, t) + sag - 0.02;
 
     const isMissing = spec.missing.includes(i);
-    const plankMat = new THREE.MeshStandardMaterial({
-      color: 0x6a4a2a,
-      roughness: 0.85,
-      transparent: isMissing,
-      opacity: isMissing ? 0.0 : 1.0,
-      emissive: 0xffd9a0,
-      emissiveIntensity: 0.0,
-    });
     const plank = new THREE.Mesh(
       new THREE.BoxGeometry(PLANK_W, 0.06, PLANK_LEN),
-      plankMat,
+      isMissing ? missingMat : _PLANK_PRESENT_MAT,
     );
     plank.position.set(px, py, pz);
     plank.rotation.y = Math.atan2(dirX, dirZ);
@@ -569,10 +933,14 @@ function buildBridge(spec, mats) {
     });
   }
 
+  // attach the shared missing-plank material so updateCliffs can animate
+  // it once per bridge instead of once per plank
+  group.userData.missingMat = missingMat;
+
   // ---- two sagging ropes: one on each side of the planks ----
   for (const side of [-1, 1]) {
     const ropePts = [];
-    const ROPE_SEGS = 24;
+    const ROPE_SEGS = 10;
     for (let i = 0; i <= ROPE_SEGS; i++) {
       const t = i / ROPE_SEGS;
       const x = ax + dxAB * t + perpX * (PLANK_W / 2 + 0.05) * side;
@@ -581,7 +949,9 @@ function buildBridge(spec, mats) {
       ropePts.push(new THREE.Vector3(x, yy, z));
     }
     const ropeCurve = new THREE.CatmullRomCurve3(ropePts);
-    const ropeGeo = new THREE.TubeGeometry(ropeCurve, 60, 0.025, 6, false);
+    // 18 tube segments × 4 radial = ~72 verts. Plenty for a thin rope at
+    // bridge distance.
+    const ropeGeo = new THREE.TubeGeometry(ropeCurve, 18, 0.025, 4, false);
     const rope = new THREE.Mesh(ropeGeo, ROPE_MAT);
     rope.castShadow = false;
     rope.receiveShadow = false;

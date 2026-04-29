@@ -557,30 +557,55 @@ export const SandParticleShader = {
     uColor:    { value: new THREE.Color("#f4d49a") },
     uSunColor: { value: new THREE.Color("#ffd28a") },
     uHaze:     { value: new THREE.Color("#cfd9c2") },
+    uSunDir:   { value: new THREE.Vector3(0.18, 0.12, -0.96).normalize() },
     uTime:     { value: 0 },
     uOpacity:  { value: 1.0 },
   },
   vertexShader: /* glsl */`
     attribute vec3 iPos;
+    attribute vec3 iVel;
     attribute float iLife;
     attribute float iSize;
     attribute float iSeed;
+    uniform vec3 uSunDir;
     varying float vLife;
     varying float vSeed;
     varying vec2 vUv;
     varying vec3 vWorld;
+    varying float vSunSide;
 
     void main() {
       vLife = iLife;
       vSeed = iSeed;
       vUv = uv;
-      // billboard in view space
-      vec4 mv = viewMatrix * vec4(iPos, 1.0);
+
       float fadeIn = smoothstep(0.0, 0.15, iLife);
       float fadeOut = 1.0 - smoothstep(0.55, 1.0, iLife);
       float s = iSize * fadeIn * fadeOut;
-      mv.xy += position.xy * s;
+
+      // per-particle rotation so the cluster doesn't look stamped
+      float rot = iSeed * 6.2831853 + iLife * (iSeed - 0.5) * 1.4;
+      float cr = cos(rot), sr = sin(rot);
+      vec2 p = vec2(position.x * cr - position.y * sr,
+                    position.x * sr + position.y * cr);
+
+      // velocity-aligned stretch in view space (fast puffs streak slightly)
+      vec3 vView = (viewMatrix * vec4(iVel, 0.0)).xyz;
+      vec2 vDir2 = vView.xy;
+      float vMag = length(vDir2);
+      vec2 along = vMag > 1e-4 ? vDir2 / vMag : vec2(1.0, 0.0);
+      vec2 across = vec2(-along.y, along.x);
+      float stretch = clamp(vMag * 0.05, 0.0, 0.55);
+      vec2 offs = along * p.x * (1.0 + stretch) + across * p.y * (1.0 - stretch * 0.5);
+
+      vec4 mv = viewMatrix * vec4(iPos, 1.0);
+      mv.xy += offs * s;
       vWorld = iPos;
+
+      // sun-side projected onto our billboard plane (right=along, up=across in view)
+      vec3 sunView = (viewMatrix * vec4(uSunDir, 0.0)).xyz;
+      vSunSide = dot(normalize(sunView.xy + 1e-5), along);
+
       gl_Position = projectionMatrix * mv;
     }
   `,
@@ -594,22 +619,67 @@ export const SandParticleShader = {
     varying float vSeed;
     varying vec2 vUv;
     varying vec3 vWorld;
+    varying float vSunSide;
+
+    // hash + value noise for wispy grain breakup
+    float hash21(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float vnoise(vec2 p) {
+      vec2 i = floor(p), f = fract(p);
+      float a = hash21(i);
+      float b = hash21(i + vec2(1.0, 0.0));
+      float c = hash21(i + vec2(0.0, 1.0));
+      float d = hash21(i + vec2(1.0, 1.0));
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    }
+    float fbm(vec2 p) {
+      float s = 0.0, amp = 0.5;
+      for (int i = 0; i < 4; i++) {
+        s += amp * vnoise(p);
+        p *= 2.03;
+        amp *= 0.5;
+      }
+      return s;
+    }
 
     void main() {
       vec2 q = vUv - 0.5;
       float r = length(q);
-      // soft puff
-      float a = smoothstep(0.5, 0.05, r);
-      // life fade
-      float fadeIn = smoothstep(0.0, 0.15, vLife);
+
+      // crisp anti-aliased disc edge — fine, not blobby
+      float aa = fwidth(r) * 1.2;
+      float disc = 1.0 - smoothstep(0.46 - aa, 0.46, r);
+
+      // wispy grain: FBM modulates the alpha so each puff looks like a
+      // small cluster of dust grains rather than a smooth circle
+      vec2 np = (vUv + vec2(vSeed * 17.3, vSeed * 9.1)) * 4.4 + uTime * 0.15;
+      float n = fbm(np);
+      float wisp = smoothstep(0.32, 0.78, n + (0.55 - r) * 1.3);
+
+      float a = disc * wisp;
+
+      // life envelope
+      float fadeIn  = smoothstep(0.0, 0.15, vLife);
       float fadeOut = 1.0 - smoothstep(0.55, 1.0, vLife);
       a *= fadeIn * fadeOut;
 
-      // colour: warm core, fade toward haze
+      // base colour: warm core, drift toward haze
       vec3 col = mix(uSunColor, uColor, smoothstep(0.0, 0.4, vLife));
       col = mix(col, uHaze, smoothstep(0.4, 1.0, vLife));
 
-      // distance haze (cheap)
+      // sun-side rim: brighten the side facing the sun, cool the far side.
+      // q.x maps to "along" axis in billboard space, which is what vSunSide is in.
+      float sunLit = clamp(0.5 + vSunSide * (q.x / max(r, 1e-3)) * 0.9, 0.0, 1.0);
+      vec3 lit = mix(uColor * 0.6, uSunColor * 1.18, sunLit);
+      col = mix(col, lit, 0.55);
+
+      // soft inner hot core (especially nice under additive blending)
+      float core = smoothstep(0.28, 0.0, r);
+      col += uSunColor * core * 0.18;
+
+      // distance haze
       float dist = length(cameraPosition - vWorld);
       float fog = clamp((dist - 60.0) / (380.0 - 60.0), 0.0, 1.0);
       col = mix(col, uHaze, fog * 0.7);

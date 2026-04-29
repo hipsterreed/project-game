@@ -33,12 +33,20 @@ export class Cloak {
     cols = 9,
     rows = 11,
     anchor,
+    // pin profile — controls how relaxed/draped the top edge looks. Default
+    // pins the entire top row in a flat line (rigid rectangle). Reduce
+    // `pinCols` to leave outer columns dangling, and `pinScale` < 1 to
+    // pinch the pinned region toward the centre.
+    pinCols = cols,
+    pinScale = 1.0,
   }) {
     this.width = width;
     this.height = height;
     this.cols = cols;
     this.rows = rows;
     this.anchor = anchor;
+    this.pinCols = Math.min(pinCols, cols);
+    this.pinScale = pinScale;
 
     this.spacingX = width / (cols - 1);
     this.spacingY = height / (rows - 1);
@@ -70,8 +78,12 @@ export class Cloak {
       }
     }
 
-    // top row pinned
-    for (let c = 0; c < cols; c++) this.pinned[idx(c, 0)] = 1;
+    // pin only the central top-row columns. Outer columns hang from their
+    // pinned neighbours via constraints, which lets gravity drape the
+    // shoulders naturally instead of forcing a flat rigid top edge.
+    const pinStart = Math.floor((cols - this.pinCols) / 2);
+    const pinEnd = pinStart + this.pinCols;
+    for (let c = pinStart; c < pinEnd; c++) this.pinned[idx(c, 0)] = 1;
 
     // ---- mesh ----
     // PlaneGeometry positioned in cloak-local space; we update
@@ -149,12 +161,15 @@ export class Cloak {
     const back = TMP_V.copy(ANCHOR_FWD).multiplyScalar(0.18); // back offset
     const halfW = this.width * 0.5;
 
+    // pinScale pinches the pin row toward the centre so the top of the
+    // cape reads as a draped shoulder line, not a rigid horizontal beam.
+    const pinScale = this.pinScale ?? 1.0;
     for (let c = 0; c < this.cols; c++) {
       const t = c / (this.cols - 1) - 0.5; // -0.5..0.5
-      const sideOffset = t * this.width;
+      const sideOffset = t * this.width * pinScale;
       // wrap: edges curve forward (toward -anchor.fwd)
       const wrap = (1 - Math.abs(t) * 2) * 0.0; // 0 = no wrap; positive = pulls back
-      const forwardCurl = Math.pow(Math.abs(t) * 2, 2) * 0.18;
+      const forwardCurl = Math.pow(Math.abs(t) * 2, 2) * 0.18 * pinScale;
 
       const px =
         ANCHOR_POS.x +

@@ -24,8 +24,9 @@ export function buildClouds() {
   // ------------------------------------------------------------
   // (a) Cloud sea plane
   // ------------------------------------------------------------
-  // Big enough that the player never sees its edge; soft sunrise tint.
-  const planeGeo = new THREE.PlaneGeometry(2400, 2400, 1, 1);
+  // 1400m × 1400m — still well past the cliff edge & fog far-plane,
+  // but a third the fill-rate of the previous 2400² plane.
+  const planeGeo = new THREE.PlaneGeometry(1400, 1400, 1, 1);
   planeGeo.rotateX(-Math.PI / 2);
 
   const planeMat = new THREE.ShaderMaterial({
@@ -36,10 +37,20 @@ export function buildClouds() {
       uTime:    { value: 0.0 },
       uPart:    partFactor,                                  // shared ref
       uSunDir:  { value: new THREE.Vector3(0.18, 0.12, -0.96).normalize() },
-      uSunCol:  { value: new THREE.Color("#ffd9a0") },
-      uTopCol:  { value: new THREE.Color("#ffc69a") },        // sunlit upper crests
-      uMidCol:  { value: new THREE.Color("#d6a89c") },        // pink-warm body
-      uLowCol:  { value: new THREE.Color("#5a4a5e") },        // cool shadow undersides
+      // muted sunrise hint — used very sparingly so the abyss stays dim
+      uSunCol:  { value: new THREE.Color("#7a5a48") },
+      // mysterious deep fog palette: cool indigo body, near-black undersides,
+      // a faint dusky bluish top so the cloud-sea reads as atmospheric haze
+      // rather than lit cotton.
+      uTopCol:  { value: new THREE.Color("#3e3a52") },        // dim bluish crests
+      uMidCol:  { value: new THREE.Color("#1c1a2c") },        // shadow body
+      uLowCol:  { value: new THREE.Color("#08070f") },        // near-black undersides
+      // cool deep fog colour blended in close to the camera so the cliff
+      // bottom melts into mystery instead of showing surfaces clearly
+      uFogCol:  { value: new THREE.Color("#0c0c18") },
+      // far horizon haze — kept warm but heavily desaturated/darkened so
+      // the sunrise still tints the distance without lighting the abyss
+      uHazeCol: { value: new THREE.Color("#3a2c30") },
     },
     vertexShader: /* glsl */`
       varying vec3 vWorldPos;
@@ -57,6 +68,8 @@ export function buildClouds() {
       uniform vec3 uTopCol;
       uniform vec3 uMidCol;
       uniform vec3 uLowCol;
+      uniform vec3 uFogCol;
+      uniform vec3 uHazeCol;
       varying vec3 vWorldPos;
 
       float h11(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -66,9 +79,11 @@ export function buildClouds() {
         return mix(mix(h11(i), h11(i+vec2(1,0)), u.x),
                    mix(h11(i+vec2(0,1)), h11(i+vec2(1,1)), u.x), u.y);
       }
+      // 3-octave FBM is plenty for the cloud sea — most pixels are far
+      // and the per-pixel cost adds up across a 2400m plane.
       float fbm(vec2 p){
         float v = 0.0; float a = 0.5;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 3; i++) {
           v += a * vn(p);
           p = p * 2.07 + 1.3;
           a *= 0.5;
@@ -77,37 +92,62 @@ export function buildClouds() {
       }
 
       void main() {
-        // drift the cloud field slowly along +x, with a slow vertical
-        // shimmer so it doesn't read as a tiled plane
+        // drift the cloud field slowly along +x
         vec2 p = vWorldPos.xz * 0.0030 + vec2(uTime * 0.012, uTime * -0.005);
         float cloud = fbm(p);
-        // crank up the contrast a bit so we get distinct cloud shapes
-        cloud = smoothstep(0.42, 0.85, cloud);
+        // wide coverage range — most of the surface should read as dense
+        // mist, not discrete puffs. Pulls the field toward "almost solid".
+        cloud = smoothstep(0.18, 0.95, cloud);
+        // wispy second layer drifting at a different rate for slow churn
+        float wisp = vn(p * 1.7 + vec2(uTime * 0.022, uTime * 0.014));
+        cloud = max(cloud, wisp * 0.82);
+        // single-octave crest detail (was a second 6-octave fbm — way too costly)
+        float crest = vn(p * 4.5 + vec2(uTime * 0.04, 0.0));
+        crest = smoothstep(0.66, 0.94, crest) * cloud;
 
-        // a second high-frequency layer for crests / detail
-        float crest = fbm(p * 4.5 + vec2(uTime * 0.04, 0.0));
-        crest = smoothstep(0.55, 0.85, crest) * cloud;
-
-        // distance fade: as we look out, blend toward warm horizon haze
+        // distance from camera to this cloud-sea pixel
         float dist = length(cameraPosition - vWorldPos);
-        float fade = clamp(1.0 - (dist - 200.0) / 1200.0, 0.0, 1.0);
 
-        // base body color from cloud density
+        // base body color from cloud density — already dim by palette
         vec3 col = mix(uLowCol, uMidCol, cloud);
-        // sunlit crests pick up the sun direction
-        col = mix(col, uTopCol, crest * 0.85);
-        // sunrise glaze: warm bias toward the sun azimuth
+        // crests catch only a whisper of the dusky top tone (was 0.85,
+        // which made foam read like sunlit cotton). Keep this low so the
+        // surface stays moody.
+        col = mix(col, uTopCol, crest * 0.22);
+        // sunrise glaze toward the sun azimuth — heavily reduced so the
+        // abyss never reads as warm/bright. Falls off with depth too:
+        // pixels far below camera receive almost none of the glaze.
         vec2 sunHoriz = normalize(uSunDir.xz);
         vec2 worldHoriz = normalize(vWorldPos.xz - cameraPosition.xz);
         float sunBias = clamp(dot(sunHoriz, worldHoriz), 0.0, 1.0);
-        col += uSunCol * sunBias * 0.10 * cloud;
+        float depth   = clamp((cameraPosition.y - vWorldPos.y) * 0.025, 0.0, 1.0);
+        col += uSunCol * sunBias * 0.025 * cloud * (1.0 - depth);
 
-        // distance to horizon: melt cloud-sea into the sky haze
-        col = mix(vec3(0.96, 0.78, 0.66), col, fade);
+        // ---- thick volumetric mist over the cloud sea ----
+        // The cliff bottom should look like dense fog you could lose
+        // yourself in. Three contributing factors:
+        //   nearFog  — pixels close to the camera (i.e. just below the
+        //              cliff edge) blend almost entirely into deep mist
+        //   downFog  — looking down increases fog density (atmospheric
+        //              build-up over the abyss)
+        //   bodyFog  — denser cloud regions are fog themselves
+        vec3 viewDir = normalize(vWorldPos - cameraPosition);
+        float downness = clamp(-viewDir.y, 0.0, 1.0);
+        float nearFog  = smoothstep(380.0, 18.0, dist);      // 1 close, 0 far
+        float downFog  = smoothstep(0.05, 0.75, downness);   // 1 looking down
+        float bodyFog  = cloud * 0.40;
+        // capped lower so cloud-shape detail is visible from above
+        float fogMix   = clamp(nearFog * 0.78 + downFog * 0.45 + bodyFog, 0.0, 0.92);
+        col = mix(col, uFogCol, fogMix);
+
+        // distant horizon: melt into a desaturated dusky haze (kept warm
+        // but dark — sunrise hint, not a beach)
+        float horizonFade = clamp((dist - 260.0) / 900.0, 0.0, 1.0);
+        col = mix(col, uHazeCol, horizonFade * 0.7);
 
         // finale "parting" — sink visibility of the cloud field as uPart -> 1
         float aliveFactor = 1.0 - smoothstep(0.0, 1.0, uPart);
-        col = mix(vec3(0.96, 0.82, 0.70), col, aliveFactor);
+        col = mix(uHazeCol, col, aliveFactor);
 
         gl_FragColor = vec4(col, 1.0);
       }
@@ -115,7 +155,9 @@ export function buildClouds() {
   });
 
   const plane = new THREE.Mesh(planeGeo, planeMat);
-  plane.position.y = -42;        // far below the cliff edge
+  // raised closer to the cliff so the mist swallows the view immediately
+  // when peering over the edge — abyss reads as a thick rolling cloud
+  plane.position.y = -22;
   plane.renderOrder = -1.5;       // before terrain, after sky
   plane.frustumCulled = false;
   group.add(plane);
@@ -127,26 +169,30 @@ export function buildClouds() {
   const puffTex = makeSoftCloudTexture();
   const puffMat = new THREE.SpriteMaterial({
     map: puffTex,
-    color: 0xffe2c0,
+    // dim cool tint so the puffs read as drifting fog tendrils against
+    // the new mysterious cloud-sea, not bright cream pillows
+    color: 0x4a4658,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.55,
     fog: false,
     depthWrite: false,
   });
 
+  // Share ONE puff material across all sprites — the older code cloned
+  // it 14× which means 14 unique materials, 14 shader uses, and a much
+  // higher per-frame uniform-upload cost.
   const puffs = [];
-  const PUFF_COUNT = 14;
+  const PUFF_COUNT = 10;
   for (let i = 0; i < PUFF_COUNT; i++) {
     const ang = (i / PUFF_COUNT) * Math.PI * 2 + Math.random() * 0.4;
     const r = 220 + Math.random() * 320;
     const x = Math.cos(ang) * r;
     const z = Math.sin(ang) * r;
     const y = -22 + Math.random() * 14;
-    const sprite = new THREE.Sprite(puffMat.clone());
+    const sprite = new THREE.Sprite(puffMat);
     const s = 80 + Math.random() * 90;
     sprite.scale.set(s * 1.4, s, 1);
     sprite.position.set(x, y, z);
-    sprite.material.opacity = 0.55 + Math.random() * 0.35;
     sprite.userData = {
       driftAng: Math.random() * Math.PI * 2,
       driftSpeed: 1.2 + Math.random() * 1.5,
@@ -157,31 +203,101 @@ export function buildClouds() {
     puffs.push(sprite);
   }
 
-  return { group, plane, planeMat, puffs, partFactor };
+  // ------------------------------------------------------------
+  // (c) Cliff-rim cloud bank
+  // ------------------------------------------------------------
+  // A dense ring of soft puffs hugging the island just below the cliff
+  // edge. From the cliff vantage these read as a thick rolling layer of
+  // clouds underneath you, hiding everything below — like looking down
+  // from an airplane through the cloud deck.
+  const rimMat = new THREE.SpriteMaterial({
+    map: puffTex,
+    // slightly lighter than the deep-fog puffs so the layer is readable
+    // as a distinct cloud bank rather than blending into the abyss
+    color: 0x6a6678,
+    transparent: true,
+    opacity: 0.85,
+    fog: false,
+    depthWrite: false,
+  });
+
+  const rimPuffs = [];
+  // Three concentric overlapping rings at different altitudes for volume.
+  // Each ring is dense enough that gaps between sprites are smaller than
+  // a sprite width — so from above the layer looks continuous.
+  const RIM_RINGS = [
+    { count: 26, r0: 95,  r1: 130, y0: -8,  y1: -16, scale: 70 },
+    { count: 30, r0: 130, r1: 180, y0: -12, y1: -22, scale: 86 },
+    { count: 22, r0: 180, r1: 230, y0: -16, y1: -26, scale: 96 },
+  ];
+  for (const ring of RIM_RINGS) {
+    for (let i = 0; i < ring.count; i++) {
+      const ang = (i / ring.count) * Math.PI * 2
+                + (Math.random() - 0.5) * (Math.PI / ring.count);
+      const r = ring.r0 + Math.random() * (ring.r1 - ring.r0);
+      const x = Math.cos(ang) * r;
+      const z = Math.sin(ang) * r;
+      const y = ring.y0 + Math.random() * (ring.y1 - ring.y0);
+      const sprite = new THREE.Sprite(rimMat);
+      const s = ring.scale + Math.random() * ring.scale * 0.5;
+      sprite.scale.set(s * 1.5, s * 0.95, 1);
+      sprite.position.set(x, y, z);
+      sprite.userData = {
+        driftAng: ang,
+        driftSpeed: 0.4 + Math.random() * 0.6,
+        bobPhase: Math.random() * Math.PI * 2,
+        baseY: y,
+        baseR: r,
+      };
+      group.add(sprite);
+      rimPuffs.push(sprite);
+    }
+  }
+
+  return { group, plane, planeMat, puffs, rimPuffs, rimMat, partFactor };
 }
 
 export function updateClouds(clouds, dt, t) {
   // animate cloud-sea shader time
   clouds.planeMat.uniforms.uTime.value = t;
 
-  // drift cloud puffs slowly tangentially, with subtle bob
+  const part = clouds.partFactor.value;
+
+  // single shared opacity for all puffs (we share the same SpriteMaterial)
+  if (clouds.puffs.length) {
+    const baseOp = 0.40 + Math.sin(t * 0.2) * 0.04;
+    clouds.puffs[0].material.opacity = baseOp * (1.0 - part * 0.85);
+  }
   for (const p of clouds.puffs) {
     p.userData.driftAng += dt * 0.005;
     const speed = p.userData.driftSpeed;
     p.position.x += Math.cos(p.userData.driftAng) * speed * dt;
     p.position.z += Math.sin(p.userData.driftAng) * speed * dt;
     p.position.y = p.userData.baseY + Math.sin(t * 0.18 + p.userData.bobPhase) * 1.4;
-    // wrap so puffs don't wander off forever
     const r = Math.hypot(p.position.x, p.position.z);
     if (r > 700) {
       const a = Math.atan2(p.position.z, p.position.x);
       p.position.x = Math.cos(a) * 200;
       p.position.z = Math.sin(a) * 200;
     }
-    // fade out as the clouds part during the finale
-    const part = clouds.partFactor.value;
-    const baseOp = 0.55 + Math.sin(t * 0.2 + p.userData.bobPhase) * 0.05;
-    p.material.opacity = baseOp * (1.0 - part * 0.85);
+  }
+
+  // ---- cliff-rim cloud bank: tangential drift around the island ----
+  if (clouds.rimMat) {
+    const baseOp = 0.85 + Math.sin(t * 0.18) * 0.05;
+    // when the finale parts the clouds, this layer thins so the reveal
+    // can show the abyss/island clearly
+    clouds.rimMat.opacity = baseOp * (1.0 - part * 0.92);
+  }
+  if (clouds.rimPuffs) {
+    for (const p of clouds.rimPuffs) {
+      // glide slowly around the island at constant radius
+      p.userData.driftAng += dt * p.userData.driftSpeed * 0.025;
+      const r = p.userData.baseR;
+      p.position.x = Math.cos(p.userData.driftAng) * r;
+      p.position.z = Math.sin(p.userData.driftAng) * r;
+      p.position.y = p.userData.baseY + Math.sin(t * 0.22 + p.userData.bobPhase) * 0.9;
+    }
   }
 }
 

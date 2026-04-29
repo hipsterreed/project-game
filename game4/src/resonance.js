@@ -343,7 +343,7 @@ export class ResonanceSystem {
       0.45 + Math.random() * 0.7,
       (Math.random() - 0.5) * 0.4,
     );
-    this.sand.motes.spawn(TMP_V, TMP_VEL, 2.6 + Math.random() * 2.0, 0.18 + Math.random() * 0.16);
+    this.sand.motes.spawn(TMP_V, TMP_VEL, 2.6 + Math.random() * 2.0, 0.07 + Math.random() * 0.08);
   }
 
   /* a mote drifting from the pillar toward the tower (visually
@@ -385,7 +385,7 @@ export class ResonanceSystem {
       TMP_VEL,
       TMP_DIR,
       life,
-      0.18 + Math.random() * 0.12,
+      0.08 + Math.random() * 0.07,
     );
   }
 

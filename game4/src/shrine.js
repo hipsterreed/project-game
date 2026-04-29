@@ -1,24 +1,23 @@
 import * as THREE from "three";
 
 /* -----------------------------------------------------------
- * Lantern Shrine — the dormant centerpiece of the island.
+ * Lantern Shrine — a sacred lantern hanging up the trail.
  *
- *   The player wakes beside this shrine. It starts dormant
- *   (dim glass, no point light) and is restored when the
- *   player presses E. Built in the same visual language as
- *   the spawn lamp it replaced (warm hooked-pole lantern)
- *   but bigger, on a 3-step stone dais, so it reads as a
- *   sacred object the world has been built around.
+ *   The player walks up to it; its flame is dim and flickering,
+ *   on the verge of going out. Press E to take the flame: the
+ *   shrine goes dark and the player's held lantern lights up.
+ *   Built in the same visual language as the spawn lamp it
+ *   replaced (warm hooked-pole lantern) but bigger, on a 3-step
+ *   stone dais, so it reads as a sacred object.
  *
  *   Returns:
  *     {
- *       group,       // THREE.Group — drop into the scene
- *       activate(t), // begins the restoration: glass brightens,
- *                    // point light rises, gentle pulse settles in
- *       update(dt,t),// per-frame flicker / pulse
- *       isActive(),  // boolean
- *       worldPos(),  // Vector3 of the lantern's lit core (for
- *                    // distance checks / ripple origin)
+ *       group,         // THREE.Group — drop into the scene
+ *       activate(t),   // start the take-the-flame transfer
+ *       update(dt,t),  // per-frame flicker / fade
+ *       isActive(),    // true once the flame has been claimed
+ *       getFlame(),    // 0..1 — current flame strength on the shrine
+ *       worldPos(),    // Vector3 of the lantern's core
  *     }
  * --------------------------------------------------------- */
 export function buildShrine() {
@@ -181,8 +180,9 @@ export function buildShrine() {
   halo.position.copy(glass.position);
   group.add(halo);
 
-  // point light at the lantern, 0 intensity until activated
-  const light = new THREE.PointLight(0xffc890, 0.0, 22, 1.6);
+  // point light at the lantern — bright enough to see from across the
+  // trail, but driven by the flame state so it pulses like it's dying.
+  const light = new THREE.PointLight(0xffc890, 0.0, 38, 1.4);
   light.position.copy(glass.position);
   group.add(light);
 
@@ -190,10 +190,13 @@ export function buildShrine() {
   const worldPivot = new THREE.Vector3();
 
   // ---- state ----
+  // flame: 1.0 = full, 0.0 = out. Starts at "dying" — dim and unstable.
+  // When activate() fires, flame fades to 0 over ~1.2s (the player has
+  // taken it).
   const state = {
     active: false,
     activatedAt: 0,
-    fade: 0,   // 0 -> 1 over ~3s after activate()
+    flame: 0.42,             // dying: low and flickering
   };
 
   function activate(t) {
@@ -204,31 +207,42 @@ export function buildShrine() {
 
   function update(dt, t) {
     if (state.active) {
-      state.fade = Math.min(1, state.fade + dt / 3.0);
+      // brief swell as it leaves, then fade to dark
+      const since = Math.max(0, t - state.activatedAt);
+      const swell = since < 0.25 ? since / 0.25 : Math.max(0, 1 - (since - 0.25) / 1.0);
+      state.flame = swell * 1.0;
+    } else {
+      // Dying-pulse rhythm: a slow heartbeat where the flame briefly swells
+      // bright, then nearly fades out before the next beat. Deep troughs so
+      // it reads as almost gone, with fast jitter on top so it feels alive
+      // and fragile. Range roughly 0.04 .. 1.0.
+      const heart = Math.sin(t * 1.4) * 0.5 + 0.5;          // 0..1, ~4.5s period
+      const heartShaped = Math.pow(heart, 2.6);             // sharp short peak, long trough
+      const fastFlick =
+        Math.sin(t * 11.3) * 0.05 +
+        Math.sin(t * 19.7 + 0.4) * 0.03;
+      // a slower gust that occasionally crushes brightness toward zero
+      const gust = Math.max(0, 1.0 - Math.pow(Math.sin(t * 0.31 + 1.1) * 0.5 + 0.5, 4.0) * 0.95);
+      state.flame = Math.max(0.04, (0.06 + heartShaped * 0.98 + fastFlick) * gust);
     }
-    const f = state.fade;
-    // ease-out cubic for the warm-up swell
-    const e = 1 - Math.pow(1 - f, 3);
+    const e = THREE.MathUtils.clamp(state.flame, 0, 1);
 
-    if (e > 0) {
-      // glass color slides from cool gray to warm amber
-      glassMat.color.setRGB(
-        0.42 + 0.62 * e,    // r
-        0.36 + 0.55 * e,    // g
-        0.28 + 0.10 * e,    // b
-      );
-      glassMat.opacity = 0.55 + 0.30 * e;
-      // core / halo / light all swell
-      coreMat.opacity = e * 0.95;
-      haloMat.opacity = e * (0.55 + Math.sin(t * 1.4) * 0.10);
-      light.intensity = e * (1.8 + Math.sin(t * 1.2) * 0.18);
-      // engraved ring pulse
-      ringMat.opacity = e * (0.55 + Math.sin(t * 0.9) * 0.18);
-      // gentle breathing scale on the core
-      const s = 1.0 + Math.sin(t * 1.6) * 0.05 * e;
-      core.scale.setScalar(s);
-      halo.scale.setScalar(s * 1.2);
-    }
+    // glass color slides from cool gray (out) to warm amber (lit)
+    glassMat.color.setRGB(
+      0.42 + 0.62 * e,
+      0.36 + 0.55 * e,
+      0.28 + 0.10 * e,
+    );
+    glassMat.opacity = 0.55 + 0.30 * e;
+    coreMat.opacity = Math.min(1, e * 1.15);
+    haloMat.opacity = e * (0.85 + Math.sin(t * 1.4) * 0.10);
+    // light intensity tracks the pulse strongly so the world brightens
+    // and dims around the post on each beat
+    light.intensity = e * (5.5 + Math.sin(t * 1.2) * 0.6);
+    ringMat.opacity = e * (0.75 + Math.sin(t * 0.9) * 0.18);
+    const s = 1.0 + Math.sin(t * 1.6) * 0.10 * e;
+    core.scale.setScalar(s);
+    halo.scale.setScalar(s * 1.2);
   }
 
   function worldPos() {
@@ -241,6 +255,7 @@ export function buildShrine() {
     activate,
     update,
     isActive: () => state.active,
+    getFlame: () => state.flame,
     worldPos,
   };
 }

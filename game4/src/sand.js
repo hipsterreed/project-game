@@ -50,6 +50,10 @@ class ParticleLayer {
     aPos.setUsage(THREE.DynamicDrawUsage);
     inst.setAttribute("iPos", aPos);
 
+    const aVel = new THREE.InstancedBufferAttribute(this.iVel, 3);
+    aVel.setUsage(THREE.DynamicDrawUsage);
+    inst.setAttribute("iVel", aVel);
+
     const aLife = new THREE.InstancedBufferAttribute(this.iLife, 1);
     aLife.setUsage(THREE.DynamicDrawUsage);
     inst.setAttribute("iLife", aLife);
@@ -68,6 +72,7 @@ class ParticleLayer {
 
     this.geometry = inst;
     this.aPos = aPos;
+    this.aVel = aVel;
     this.aLife = aLife;
     this.aSize = aSize;
     this.aSeed = aSeed;
@@ -149,6 +154,7 @@ class ParticleLayer {
     }
 
     this.aPos.needsUpdate = true;
+    this.aVel.needsUpdate = true;
     this.aLife.needsUpdate = true;
     this.aSize.needsUpdate = true;
   }
@@ -311,6 +317,12 @@ class StreamLayer {
     const aPos = new THREE.InstancedBufferAttribute(this.iPos, 3);
     aPos.setUsage(THREE.DynamicDrawUsage);
     inst.setAttribute("iPos", aPos);
+
+    // Stream motes don't have a meaningful velocity attribute — supply
+    // zeros so the shared SandParticleShader gets a valid iVel binding.
+    const zeroVel = new Float32Array(capacity * 3);
+    const aVel = new THREE.InstancedBufferAttribute(zeroVel, 3);
+    inst.setAttribute("iVel", aVel);
 
     const aLife = new THREE.InstancedBufferAttribute(this.iLife, 1);
     aLife.setUsage(THREE.DynamicDrawUsage);
@@ -490,7 +502,7 @@ export class SandSystem {
         p,
         v,
         0.28 + Math.random() * 0.22,            // very short life
-        0.05 + Math.random() * 0.05,            // tiny size
+        0.025 + Math.random() * 0.03,           // very fine grain
       );
     }
   }
@@ -533,7 +545,7 @@ export class SandSystem {
         p,
         v,
         1.2 + Math.random() * 0.9,
-        0.30 + Math.random() * 0.22,
+        0.12 + Math.random() * 0.10,
       );
     }
   }
@@ -557,7 +569,7 @@ export class SandSystem {
         0.3 + Math.random() * 0.6,
         Math.sin(a) * radial,
       );
-      this.foot.spawn(p, v, 0.9 + Math.random() * 0.8, 0.42 + Math.random() * 0.32);
+      this.foot.spawn(p, v, 0.9 + Math.random() * 0.8, 0.16 + Math.random() * 0.14);
     }
   }
 
@@ -586,7 +598,7 @@ export class SandSystem {
         0.4 + Math.random() * 0.5 + slope * 0.6,
         back.z * (1.5 + Math.random()) + (Math.random() - 0.5) * 0.4,
       );
-      this.slide.spawn(p, v, 1.2 + Math.random() * 0.6, 0.38 + Math.random() * 0.3);
+      this.slide.spawn(p, v, 1.2 + Math.random() * 0.6, 0.14 + Math.random() * 0.12);
     }
   }
 
@@ -634,7 +646,7 @@ export class SandSystem {
         (Math.random() - 0.4) * 0.4,
         wDir.z * (2.0 + Math.random() * 1.2),
       );
-      layer.spawn(p, v, 3.5 + Math.random() * 2.5, 0.18 + Math.random() * 0.18);
+      layer.spawn(p, v, 3.5 + Math.random() * 2.5, 0.07 + Math.random() * 0.08);
     }
   }
 
@@ -655,7 +667,7 @@ export class SandSystem {
         0.5 + Math.random() * 0.7,
         (Math.random() - 0.5) * 0.35,
       );
-      this.motes.spawn(p, v, 2.2 + Math.random() * 2.4, 0.16 + Math.random() * 0.16);
+      this.motes.spawn(p, v, 2.2 + Math.random() * 2.4, 0.06 + Math.random() * 0.08);
     }
   }
 
@@ -737,7 +749,7 @@ export class SandSystem {
         0.7 + Math.random() * 0.6,
         (Math.random() - 0.5) * 0.4,
       );
-      this.motes.spawn(p, v, 2.5 + Math.random() * 2.0, 0.18 + Math.random() * 0.16);
+      this.motes.spawn(p, v, 2.5 + Math.random() * 2.0, 0.07 + Math.random() * 0.08);
     }
   }
 

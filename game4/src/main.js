@@ -15,7 +15,7 @@ import { ToneMapShader } from "./shaders.js";
 
 /* -----------------------------------------------------------
  * Act One — The Quiet Cliffs
- *   States:  awakening → exploring → restoring → ascending → finale
+ *   States:  exploring → restoring → ascending → finale
  *   No HUD, no compass, no lore prose. The world tells the story.
  * --------------------------------------------------------- */
 
@@ -38,11 +38,14 @@ const renderer = new THREE.WebGLRenderer({
   antialias: true,
   powerPreference: "high-performance",
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+// Cap pixel ratio at 1.5 — on retina/4K displays the older 1.75 cap was
+// pushing the GPU hard enough to starve the audio thread. 1.5 still
+// looks crisp and recovers a lot of headroom.
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.92;
+renderer.toneMappingExposure = 1.0;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 app.appendChild(renderer.domElement);
@@ -86,7 +89,6 @@ const resonance = new ResonanceSystem({
 
 // ---- footsteps: dust on dirt patches, tiny chance of bloom near shrine ----
 player.onFootstep = (foot, pos, vel, sprintBlend) => {
-  if (mode === "awakening") return;            // silent until standing
   audio.playFootstep(0.6 + sprintBlend * 0.4, sprintBlend);
 
   const terrainY = world.getTerrainHeight(pos.x, pos.z);
@@ -104,7 +106,6 @@ player.onFootstep = (foot, pos, vel, sprintBlend) => {
   }
 };
 player.onLand = (impactSpeed) => {
-  if (mode === "awakening") return;
   audio.playLanding(impactSpeed);
 };
 
@@ -113,10 +114,13 @@ const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 
 const bloom = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.42,    // strength — bumped a touch so the shrine + Last Light glow more
-  0.95,
-  0.84,
+  // run bloom at half resolution — the falloff hides the lower res, and
+  // it was costing 1-2ms/frame at full res. Pre-dawn: a touch more bloom
+  // strength so the lantern, eyes, and Last Light pop in the dim air.
+  new THREE.Vector2(window.innerWidth * 0.5, window.innerHeight * 0.5),
+  0.50,
+  0.72,
+  0.78,
 );
 composer.addPass(bloom);
 
@@ -127,21 +131,20 @@ composer.addPass(new OutputPass());
 /* -----------------------------------------------------------
  * State machine
  * --------------------------------------------------------- */
-let mode = "awakening";       // awakening → exploring → restoring → ascending → finale → done
+let mode = "exploring";        // exploring → restoring → ascending → finale → done
 let stateTime = 0;             // seconds since this state began
 let firstInputAt = 0;          // when the player first touched a key/mouse
 
 // finale fade overlay (created lazily)
 let fadeOverlay = null;
 
-// ---- begin: skip the legacy menu/Begin flow, start in awakening ----
+// ---- begin: skip the legacy menu/Begin flow, walking is enabled instantly ----
 titleEl?.classList.add("hidden");
 beginBtn?.classList.add("hidden");
 hud?.classList.add("visible");
 
-// the first input transitions into "exploring" — until then, controls
-// are locked and the camera sits low looking at the shrine.
-let controlsEnabled = false;
+// player has full control from the moment the game loads
+player.canControl = true;
 
 function arm() {
   audio.start();
@@ -150,40 +153,24 @@ function arm() {
 
 window.addEventListener("pointerdown", () => {
   arm();
-  if (mode === "awakening") tryWake();
+  noteFirstInput();
 });
 window.addEventListener("keydown", (e) => {
   arm();
-  if (mode === "awakening") tryWake();
-  // press E near the shrine to trigger restoration
+  noteFirstInput();
+  // press E near the dying lantern to take its flame
   if (e.code === "KeyE" && mode === "exploring") {
     if (canRestoreNow()) startRestoration();
   }
 });
 
-function tryWake() {
+function noteFirstInput() {
   if (firstInputAt > 0) return;
   firstInputAt = clock.getElapsedTime();
-  // request pointer lock on first gesture
   renderer.domElement.requestPointerLock?.();
-  // controls are enabled in the awakening→exploring transition (so the
-  // intro 1.4s isn't disrupted by the player walking through the camera)
   showTitle("The Quiet Cliffs", 0.5, 4.0, 1.5);
 }
 
-/* -----------------------------------------------------------
- * Awakening pose — the player starts crouched/seated until first
- *   input. We achieve "seated" by lowering the body group + a
- *   forward tilt, then ease back to standing on first input.
- *
- *   Camera is locked low and angled at the dormant shrine.
- * --------------------------------------------------------- */
-// (seatedTarget / standingTarget pose constants used to live here, but
-//  modifying player.body.rotation fights the player's per-frame quat
-//  set. The awakening framing is now camera-only.)
-
-// disable input from the start — Player.enableControl() is called on first input
-player.canControl = false;
 
 /* -----------------------------------------------------------
  * Title overlay (single line, no UI library) — fades in/out and
@@ -251,10 +238,10 @@ function showEnd(text) {
   endEl.style.opacity = "1";
 }
 
-/* ----- press-E prompt for the shrine ----- */
+/* ----- press-E prompt for the dying lantern ----- */
 function showShrinePrompt() {
   if (promptEl) {
-    promptEl.textContent = "[E] place your hand";
+    promptEl.textContent = "[E] take the flame";
     promptEl.classList.add("show");
   }
 }
@@ -274,57 +261,204 @@ function canRestoreNow() {
   return d < 4.5;
 }
 
+/* -----------------------------------------------------------
+ * Take-the-flame cinematic
+ *
+ *   Triggered by [E] near the dying lantern. Locks player input,
+ *   walks the avatar the last few steps to the shrine, has them
+ *   raise their lantern overhead, then a glowing mote arcs from
+ *   the shrine's flame down into the held lantern. The world
+ *   ripple fires when the flame lands.
+ *
+ *   Phases (durations in seconds):
+ *     APPROACH (1.4) — auto-walk to the shrine, body faces it
+ *     RAISE    (0.9) — lantern rises overhead, brief held beat
+ *     JUMP     (0.9) — flame leaves shrine, arcs into lantern
+ *     SETTLE   (0.5) — lower lantern, ripple has been triggered
+ * --------------------------------------------------------- */
+const TF_APPROACH = 1.4;
+const TF_RAISE    = 0.9;
+const TF_JUMP     = 0.9;
+const TF_SETTLE   = 0.35;
+const TF_TOTAL    = TF_APPROACH + TF_RAISE + TF_JUMP + TF_SETTLE;
+
+let flameTransfer = null;       // active cinematic state
+let rippleArmed = false;        // whether resonance ripple has been kicked
+
 function startRestoration() {
   mode = "restoring";
   stateTime = 0;
   hideShrinePrompt();
   player.canControl = false;
   audio.fadeOut(1.0);
-  // arm the wave; the resonance system carries it out from here
-  resonance.triggerRipple?.(world.shrine.worldPos(), {
-    speed: 36,           // m/s — covers ~110m in ~3s
-    maxRadius: 200,
-    onComplete: () => {
-      // finale opens up after restoration settles
+  rippleArmed = false;
+
+  const sp = world.shrine.worldPos().clone();
+  // approach target: stop ~2.3m from the shrine, facing it
+  const dx = player.position.x - sp.x;
+  const dz = player.position.z - sp.z;
+  const d = Math.max(0.0001, Math.hypot(dx, dz));
+  const stopDist = 2.3;
+  const approachTarget = new THREE.Vector3(
+    sp.x + (dx / d) * stopDist,
+    0,
+    sp.z + (dz / d) * stopDist,
+  );
+  approachTarget.y = world.getTerrainHeight(approachTarget.x, approachTarget.z);
+  const facingYaw = Math.atan2(-(sp.x - approachTarget.x), -(sp.z - approachTarget.z));
+
+  flameTransfer = {
+    t0: clock.getElapsedTime(),
+    sp,
+    startPos: player.position.clone(),
+    approachTarget,
+    facingYaw,
+    mote: null,
+  };
+}
+
+function makeFlameMote(pos) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xfff1c4,
+    transparent: true,
+    opacity: 1,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 8), mat);
+  mesh.position.copy(pos);
+  scene.add(mesh);
+  return mesh;
+}
+
+const _flameTarget = new THREE.Vector3();
+const _approachTmp = new THREE.Vector3();
+function updateFlameTransfer(t, dt) {
+  if (!flameTransfer) return;
+  const elapsed = t - flameTransfer.t0;
+
+  // ---- phase: APPROACH ----
+  if (elapsed < TF_APPROACH) {
+    const u = elapsed / TF_APPROACH;
+    const eased = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+    _approachTmp.lerpVectors(flameTransfer.startPos, flameTransfer.approachTarget, eased);
+    _approachTmp.y = world.getTerrainHeight(_approachTmp.x, _approachTmp.z);
+    // drive position + a fake forward velocity so the walk cycle plays
+    const prevX = player.position.x;
+    const prevZ = player.position.z;
+    player.position.x = _approachTmp.x;
+    player.position.y = _approachTmp.y;
+    player.position.z = _approachTmp.z;
+    player.velocity.x = (player.position.x - prevX) / Math.max(dt, 1e-4);
+    player.velocity.z = (player.position.z - prevZ) / Math.max(dt, 1e-4);
+    player.velocity.y = 0;
+    player.bodyYaw = lerpAngle(player.bodyYaw, flameTransfer.facingYaw, Math.min(1, dt * 5));
+    player.targetYaw = flameTransfer.facingYaw;
+    player.lanternRaise = 0;
+    return;
+  }
+
+  // standing still from here on
+  player.velocity.x = 0;
+  player.velocity.z = 0;
+  player.bodyYaw = lerpAngle(player.bodyYaw, flameTransfer.facingYaw, Math.min(1, dt * 6));
+
+  // ---- phase: RAISE (lift the lantern overhead) ----
+  const raiseStart = TF_APPROACH;
+  const jumpStart  = TF_APPROACH + TF_RAISE;
+  const settleStart = jumpStart + TF_JUMP;
+
+  if (elapsed < jumpStart) {
+    const u = (elapsed - raiseStart) / TF_RAISE;
+    const eased = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+    player.lanternRaise = eased;
+    return;
+  }
+
+  // ---- phase: JUMP (flame crosses from shrine to lantern) ----
+  if (elapsed < settleStart) {
+    player.lanternRaise = 1;
+    if (!flameTransfer.mote) {
+      flameTransfer.mote = makeFlameMote(flameTransfer.sp);
+      // shrine flame begins fading out
+      world.shrine.activate(t);
+    }
+    const u = (elapsed - jumpStart) / TF_JUMP;
+
+    // lantern world position (where the held core sits)
+    if (player.heldLanternCore) {
+      player.heldLanternCore.getWorldPosition(_flameTarget);
+    } else {
+      _flameTarget.copy(player.position);
+      _flameTarget.y += 2.2;
+    }
+    const m = flameTransfer.mote;
+    m.position.lerpVectors(flameTransfer.sp, _flameTarget, u);
+    m.position.y += Math.sin(u * Math.PI) * 0.55;
+    m.material.opacity = u < 0.82 ? 1.0 : Math.max(0, 1.0 - (u - 0.82) / 0.18);
+
+    // lit-ness ramps with u, with a final flash near the end
+    player.heldLanternFlame = Math.pow(u, 1.4);
+
+    // arm the world ripple just before the flame lands, and hand control
+    // back to the player at the same moment so the SETTLE phase is just
+    // visual polish — they can already walk away.
+    if (!rippleArmed && u > 0.7) {
+      rippleArmed = true;
+      resonance.triggerRipple?.(flameTransfer.sp, {
+        speed: 36,
+        maxRadius: 200,
+        // ripple onComplete only handles the late-game ascending bump
+        onComplete: () => {
+          if (mode === "restoring") {
+            mode = "ascending";
+            stateTime = 0;
+          }
+        },
+      });
       mode = "ascending";
       stateTime = 0;
       player.canControl = true;
-      audio.fadeIn(2.5);
-    },
-  });
-  // the shrine itself starts swelling immediately
-  world.shrine.activate(clock.getElapsedTime());
+      audio.fadeIn(1.2);
+    }
+    return;
+  }
+
+  // ---- phase: SETTLE (lower lantern, player already in control) ----
+  if (elapsed < TF_TOTAL) {
+    const u = (elapsed - settleStart) / TF_SETTLE;
+    player.lanternRaise = 1 - (u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2);
+    player.heldLanternFlame = 1;
+    if (flameTransfer.mote && flameTransfer.mote.material.opacity > 0) {
+      flameTransfer.mote.material.opacity = Math.max(
+        0, flameTransfer.mote.material.opacity - dt * 4,
+      );
+    }
+    return;
+  }
+
+  // ---- cinematic complete ----
+  if (flameTransfer.mote) {
+    scene.remove(flameTransfer.mote);
+    flameTransfer.mote.geometry.dispose();
+    flameTransfer.mote.material.dispose();
+  }
+  player.lanternRaise = 0;
+  player.heldLanternFlame = 1;
+  flameTransfer = null;
 }
 
-// camera helpers for awakening intro pan
+function lerpAngle(a, b, t) {
+  let d = b - a;
+  while (d >  Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+// camera / scratch vectors used by later cinematic states
 const _camIdealPos = new THREE.Vector3();
 const _camLook = new THREE.Vector3();
 const _tmpVec = new THREE.Vector3();
-
-function awakeningCameraUpdate(dt, t) {
-  // Awakening framing: camera sits low and slightly behind/right of the
-  // player. Player is facing -Z (toward the cliff edge / sunrise). The
-  // dormant shrine sits at (0,0,0), just to the player's rear-left, so
-  // it reads in the foreground. The Last Light is visible above the
-  // cliff in the distance.
-  // (We don't modify the player's body pose — the camera framing alone
-  //  communicates the quiet, intimate moment.)
-  const sway = Math.sin(t * 0.08) * 0.02;
-  const targetX = player.position.x + 2.6 + sway;
-  const targetY = player.position.y + 1.55;
-  const targetZ = player.position.z + 3.4;
-  _camIdealPos.set(targetX, targetY, targetZ);
-  camera.position.lerp(_camIdealPos, dt * 1.6);
-  // look slightly forward and up — toward the cliff edge, with the
-  // shrine framed off camera-left
-  _camLook.set(player.position.x - 1.2, player.position.y + 1.7, player.position.z - 28);
-  camera.lookAt(_camLook);
-}
-
-function intoExploringEase(dt) {
-  // no body pose to ease — the player stands naturally as soon as they
-  // gain control. The mode transition itself is the visual cue.
-}
 
 // Soft fall-prevention: if the player slips off the cliff before
 // restoration, gently teleport them back to spawn rather than letting
@@ -336,22 +470,85 @@ function fallPrevention() {
   }
 }
 
+/* Step-front respawn: when the player misses a pad and falls below the
+ * mist line, drop them just back from the cliff edge in front of the
+ * first stepping pad (not all the way back at spawn) and show a short
+ * "the shadows have spared your life" message. */
+const STEP_FRONT = new THREE.Vector3(
+  0,
+  world.getTerrainHeight(0, -94) + 0.5,
+  -94,
+);
+const FOG_DEATH_Y = -25;     // anything below the cloud plane counts as "in the fog"
+let shadowsCooldown = 0;     // seconds — debounce so we don't re-fire mid-teleport
+
+let shadowsEl = null;
+function ensureShadowsMessage() {
+  if (shadowsEl) return shadowsEl;
+  const el = document.createElement("div");
+  el.style.position = "fixed";
+  el.style.left = "0";
+  el.style.right = "0";
+  el.style.bottom = "22%";
+  el.style.textAlign = "center";
+  el.style.color = "rgba(220, 210, 230, 0.92)";
+  el.style.font = "300 26px/1.4 Georgia, serif";
+  el.style.letterSpacing = "0.20em";
+  el.style.opacity = "0";
+  el.style.pointerEvents = "none";
+  el.style.textShadow = "0 0 22px rgba(8, 4, 18, 0.85), 0 0 4px rgba(0,0,0,0.9)";
+  el.style.transition = "opacity 1.2s ease-in-out";
+  el.style.zIndex = "70";
+  el.textContent = "the shadows have spared your life";
+  document.body.appendChild(el);
+  shadowsEl = el;
+  return el;
+}
+
+function fallToShadows() {
+  player.position.copy(STEP_FRONT);
+  player.velocity.set(0, 0, 0);
+  const el = ensureShadowsMessage();
+  el.style.opacity = "1";
+  // hold for ~2.4s, then fade out
+  clearTimeout(shadowsEl._hideTimer);
+  shadowsEl._hideTimer = setTimeout(() => { el.style.opacity = "0"; }, 2400);
+  shadowsCooldown = 1.2;
+}
+
 function restoringCameraUpdate(dt, t) {
-  // slow-zoom toward the shrine
+  // Cinematic two-shot framing: camera sits to the side of the player
+  // looking past them at the shrine, drifts forward subtly during the
+  // approach, then swings up slightly when the lantern is raised.
   const sp = world.shrine.worldPos();
-  const ang = stateTime * 0.20;     // small drift around shrine
-  const dist = THREE.MathUtils.lerp(5.0, 2.6, THREE.MathUtils.smoothstep(stateTime, 0, 1.5));
-  const yOff = 1.6;
+  const pp = player.position;
+  // direction perpendicular to the player→shrine line, used as the side offset
+  const dx = sp.x - pp.x;
+  const dz = sp.z - pp.z;
+  const len = Math.max(0.0001, Math.hypot(dx, dz));
+  const nx = dx / len, nz = dz / len;
+  // perp (rotate 90°): (-nz, nx)
+  const px = -nz, pz = nx;
+
+  const sideOff = 3.6;
+  const backOff = -0.6;     // negative = camera slightly behind the player
+  const heightLift = 1.7 + (player.lanternRaise || 0) * 0.6;
   _camIdealPos.set(
-    sp.x - Math.sin(ang) * dist,
-    sp.y + yOff,
-    sp.z - Math.cos(ang) * dist,
+    pp.x + px * sideOff + nx * backOff,
+    pp.y + heightLift,
+    pp.z + pz * sideOff + nz * backOff,
   );
-  camera.position.lerp(_camIdealPos, dt * 1.3);
-  camera.lookAt(sp.x, sp.y + 2.0, sp.z);
+  camera.position.lerp(_camIdealPos, dt * 2.2);
+  // look at the midpoint between player chest and shrine glass — keeps
+  // both subjects in frame while the flame jumps the gap
+  const midX = (pp.x + sp.x) * 0.5;
+  const midZ = (pp.z + sp.z) * 0.5;
+  const midY = pp.y + 1.6 + (player.lanternRaise || 0) * 0.3;
+  camera.lookAt(midX, midY, midZ);
 }
 
 let finaleStarted = false;
+const _finaleStart = { camPos: new THREE.Vector3(), planetSize: 0.06 };
 function maybeStartFinale() {
   if (finaleStarted) return;
   // distance to the cliff edge
@@ -363,46 +560,121 @@ function maybeStartFinale() {
     mode = "finale";
     stateTime = 0;
     player.canControl = false;
+    // capture start state so the cinematic pan begins from wherever the
+    // camera was, instead of snapping
+    _finaleStart.camPos.copy(camera.position);
+    _finaleStart.planetSize = world.skyMat.uniforms.uPlanetSize.value;
   }
 }
 
-function finaleUpdate(dt, t) {
-  // 0..3.5s : camera tilts up, cloud sea sinks, Last Light grows
-  const u = THREE.MathUtils.clamp(stateTime / 3.5, 0, 1);
-  const eased = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+// finale pacing — pan, rise, hold, then return control to the player
+const FN_PAN  = 2.2;
+const FN_RISE = 2.6;
+const FN_HOLD = 0.9;
+const FN_REVEAL_END = FN_PAN + FN_RISE + FN_HOLD;
 
-  // cloud part driver
+function finaleUpdate(dt, t) {
+  // ---- fade out the Last Light (the "other floating thing") ----
+  // shrink it through the pan phase and clamp to 0; once gone, the player's
+  // eye has nowhere to drift but the new sky island.
+  const lastLightFade = THREE.MathUtils.clamp(stateTime / 1.6, 0, 1);
+  world.skyMat.uniforms.uPlanetSize.value =
+    _finaleStart.planetSize * (1 - lastLightFade);
+
+  // ---- cloud sea: parts and sinks as before, gives the reveal scale ----
+  const cloudT = THREE.MathUtils.clamp(stateTime / (FN_PAN + FN_RISE), 0, 1);
+  const cloudEased = cloudT < 0.5
+    ? 2 * cloudT * cloudT
+    : 1 - Math.pow(-2 * cloudT + 2, 2) / 2;
   if (world.clouds) {
-    world.clouds.partFactor.value = eased;
-    world.clouds.plane.position.y = -42 - eased * 24;   // sinks
+    world.clouds.partFactor.value = cloudEased;
+    world.clouds.plane.position.y = -22 - cloudEased * 30;
   }
-  // Last Light grows
-  world.skyMat.uniforms.uPlanetSize.value = 0.06 + eased * 0.10;
-  // sky base brightens slightly toward white
+
+  // sky base brightens slightly toward white (kept from the prior finale)
   const horiz = world.skyMat.uniforms.uHorizon.value;
   horiz.lerp(new THREE.Color("#ffe4c4"), dt * 0.6);
 
-  // camera: from current position, tilt up toward Last Light
-  const lp = world.skyMat.uniforms.uPlanetDir.value;
-  const lookTarget = _tmpVec.set(
-    player.position.x + lp.x * 600,
-    player.position.y + lp.y * 600,
-    player.position.z + lp.z * 600,
-  );
-  camera.position.x = THREE.MathUtils.lerp(camera.position.x, player.position.x, dt * 0.8);
-  camera.position.y = THREE.MathUtils.lerp(camera.position.y, player.position.y + 2.8, dt * 0.6);
-  camera.position.z = THREE.MathUtils.lerp(camera.position.z, player.position.z + 2.0, dt * 0.8);
-  camera.lookAt(lookTarget);
+  // ---- camera cinematic ----
+  // Phase 1 (0..FN_PAN): pan from the player's cliff vantage toward a
+  //   close framing of the lighthouse on the new sky island.
+  // Phase 2 (FN_PAN..FN_PAN+FN_RISE): rise up and pull back so the whole
+  //   circular island and its glowing runes come into view from above.
+  const islandPos = world.cliffs?.skyIsland?.group?.position;
+  if (!islandPos) return;
+  const ix = islandPos.x;
+  const iy = islandPos.y;
+  const iz = islandPos.z;
 
-  // fade to white starting at 3.0s
-  if (stateTime > 3.0) {
-    const fadeT = THREE.MathUtils.clamp((stateTime - 3.0) / 2.0, 0, 1);
-    const ov = ensureFadeOverlay();
-    ov.style.opacity = `${fadeT}`;
-    if (fadeT >= 1.0 && mode !== "done") {
-      mode = "done";
-      showEnd("to be continued");
-    }
+  // anchor A: where the camera was when finale started (player at cliff)
+  const aX = _finaleStart.camPos.x;
+  const aY = _finaleStart.camPos.y;
+  const aZ = _finaleStart.camPos.z;
+  // anchor B: cinematic vantage near the island, low and close to frame
+  //   the lighthouse against the sky
+  const bX = ix + 4;
+  const bY = iy + 6;
+  const bZ = iz + 32;
+  // anchor C: high reveal, looking down on the disc and runes
+  const cX = ix + 6;
+  const cY = iy + 34;
+  const cZ = iz + 24;
+
+  const panT  = THREE.MathUtils.clamp(stateTime / FN_PAN, 0, 1);
+  const panE  = panT * panT * (3 - 2 * panT);
+  const riseT = THREE.MathUtils.clamp((stateTime - FN_PAN) / FN_RISE, 0, 1);
+  const riseE = riseT * riseT * (3 - 2 * riseT);
+
+  // pan A→B, then rise B→C
+  const pX = THREE.MathUtils.lerp(aX, bX, panE);
+  const pY = THREE.MathUtils.lerp(aY, bY, panE);
+  const pZ = THREE.MathUtils.lerp(aZ, bZ, panE);
+  const fX = THREE.MathUtils.lerp(pX, cX, riseE);
+  const fY = THREE.MathUtils.lerp(pY, cY, riseE);
+  const fZ = THREE.MathUtils.lerp(pZ, cZ, riseE);
+
+  // ease toward the keyframe rather than snap — keeps motion velvety
+  camera.position.lerp(_tmpVec.set(fX, fY, fZ), Math.min(1, dt * 2.4));
+
+  // look target: lighthouse lantern during pan, drifts down to the
+  // island disc as the camera rises so the runes come into frame
+  const lookY = (iy + 11) - riseE * 9;
+  camera.lookAt(ix, lookY, iz);
+
+  // ---- end of reveal: hand control back so the player can hop the pads ----
+  if (stateTime > FN_REVEAL_END) {
+    mode = "traversing";
+    stateTime = 0;
+    player.canControl = true;
+  }
+}
+
+/* Lighthouse-reach ending — once the player makes it onto the sky island
+ * and is close to the lighthouse, fade to white and show "to be continued". */
+let lighthouseReached = false;
+function maybeFinishOnLighthouse() {
+  if (lighthouseReached) return;
+  const isle = world.cliffs?.skyIsland?.group?.position;
+  if (!isle) return;
+  const dx = player.position.x - isle.x;
+  const dz = player.position.z - isle.z;
+  const dy = player.position.y - isle.y;
+  // on the disc (within ~6m of the lighthouse base) and at island height
+  if (Math.hypot(dx, dz) < 6.0 && dy > -1.0 && dy < 6.0) {
+    lighthouseReached = true;
+    mode = "ending";
+    stateTime = 0;
+    player.canControl = false;
+  }
+}
+
+function endingUpdate(dt) {
+  const fadeT = THREE.MathUtils.clamp(stateTime / 1.8, 0, 1);
+  const ov = ensureFadeOverlay();
+  ov.style.opacity = `${fadeT}`;
+  if (fadeT >= 1.0 && mode !== "done") {
+    mode = "done";
+    showEnd("to be continued");
   }
 }
 
@@ -418,19 +690,18 @@ function animate() {
   lastTime = t;
   stateTime += dt;
 
-  updateWorld(world, dt, t);
+  updateWorld(world, dt, t, player, audio);
   tonePass.uniforms.uTime.value = t;
+  updateFlameTransfer(t, dt);
 
   // ---- player update with state-aware overrides ----
-  if (mode === "awakening") {
+  if (mode === "exploring") {
     player.update(dt, t);
-    awakeningCameraUpdate(dt, t);
-  } else if (mode === "exploring") {
-    player.update(dt, t);
-    intoExploringEase(dt);
     fallPrevention();
-    // proximity prompt for the shrine
+    // proximity prompt for the dying lantern
     if (canRestoreNow()) showShrinePrompt(); else hideShrinePrompt();
+    // cliff-edge proximity also triggers the reveal cinematic
+    maybeStartFinale();
   } else if (mode === "restoring") {
     player.update(dt, t);
     restoringCameraUpdate(dt, t);
@@ -443,16 +714,20 @@ function animate() {
   } else if (mode === "finale") {
     player.update(dt, t);
     finaleUpdate(dt, t);
+  } else if (mode === "traversing") {
+    // player has control; pads are walkable, lighthouse is the goal
+    player.update(dt, t);
+    shadowsCooldown = Math.max(0, shadowsCooldown - dt);
+    if (shadowsCooldown === 0 && player.position.y < FOG_DEATH_Y) {
+      fallToShadows();
+    }
+    maybeFinishOnLighthouse();
+  } else if (mode === "ending") {
+    player.update(dt, t);
+    endingUpdate(dt);
   } else {
     // "done" — keep updating particles + cloak so the final shot is alive
     player.update(dt, t);
-  }
-
-  // promote awakening -> exploring once the body has stood up enough
-  if (mode === "awakening" && firstInputAt > 0 && (t - firstInputAt) > 1.4) {
-    mode = "exploring";
-    stateTime = 0;
-    player.enableControl();
   }
 
   // sun shadow camera follows the player
@@ -466,11 +741,11 @@ function animate() {
   world.sun.target.updateMatrixWorld();
 
   // wind for sand & audio
-  const windScale = (mode === "awakening") ? 0.2 : (world.shrine?.isActive() ? 1.3 : 1.0);
+  const windScale = world.shrine?.isActive() ? 1.3 : 1.0;
   const wind = computeGlobalWind(t, player.velocity, windScale);
   sand.update(dt, t, wind, camera, player);
   flowers.update(dt);
-  if (mode !== "awakening") resonance.update(dt, t);
+  resonance.update(dt, t);
   audio.update(dt, t, {
     speed: player.currentSpeed,
     sliding: player.sliding,
@@ -478,15 +753,25 @@ function animate() {
   });
 
   // restoration animation drivers (cliff props)
-  if (mode === "restoring" || mode === "ascending" || mode === "finale" || mode === "done") {
+  if (
+    mode === "restoring" || mode === "ascending" || mode === "finale" ||
+    mode === "traversing" || mode === "ending" || mode === "done"
+  ) {
     const since = (mode === "restoring") ? stateTime : Math.max(stateTime + 6, 6);
     world.cliffs?.setRestoring(THREE.MathUtils.clamp(since / 2.5, 0, 1));
     world.cliffs?.setBridgeReformProgress(THREE.MathUtils.clamp((since - 0.4) / 3.5, 0, 1));
     // wind bridge: starts forming after restoration ripple has covered
     // the island (~5s in restoring), then completes during ascending.
-    const wbT = (mode === "restoring")
-      ? THREE.MathUtils.clamp((stateTime - 4.0) / 4.0, 0, 1)
-      : THREE.MathUtils.clamp(1.0 + stateTime / 6.0, 0, 1);
+    // Once finale fires we lock it at 1 so the pads stay walkable for
+    // traversing/ending no matter how stateTime resets between modes.
+    let wbT;
+    if (mode === "restoring") {
+      wbT = THREE.MathUtils.clamp((stateTime - 4.0) / 4.0, 0, 1);
+    } else if (mode === "ascending") {
+      wbT = THREE.MathUtils.clamp(1.0 + stateTime / 6.0, 0, 1);
+    } else {
+      wbT = 1;
+    }
     world.cliffs?.setWindBridgeProgress(wbT);
   }
 
@@ -513,6 +798,8 @@ window.addEventListener("resize", () => {
   const h = window.innerHeight;
   renderer.setSize(w, h);
   composer.setSize(w, h);
+  // keep bloom at half-res
+  bloom.setSize(w * 0.5, h * 0.5);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 });

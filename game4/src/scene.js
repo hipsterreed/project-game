@@ -19,16 +19,17 @@ import { buildBirds, updateBirds } from "./birds.js";
 //   SHRINE_POSITION = where the dormant lantern shrine sits (island centre)
 //   SPAWN_POSITION  = where the player wakes (next to the shrine)
 //   CLIFF_EDGE      = the dramatic cliff vantage (final shot)
-export const SHRINE_POSITION = new THREE.Vector3(0, 0, 0);
+export const SHRINE_POSITION = new THREE.Vector3(0, 0, -32);
 export const SPAWN_POSITION = new THREE.Vector3(2.4, 0, 4.0);
 export const CLIFF_EDGE = new THREE.Vector3(0, 0, -98);
 // legacy names kept so existing imports still resolve
 export const TOWER_POSITION = SHRINE_POSITION;
 export const ARCH_POSITION = SHRINE_POSITION;
 
-// sunrise: low golden sun coming from the cliff direction so the
-// player sees the world rim-lit and silhouetted from sunrise side.
-const SUN_DIR = new THREE.Vector3(0.18, 0.12, -0.96).normalize();
+// pre-dawn: sun is still below the horizon, casting only a low rim of
+// warm light. The world reads dim and silhouetted; the trail lantern
+// becomes the obvious thing to walk toward.
+const SUN_DIR = new THREE.Vector3(0.18, 0.05, -0.96).normalize();
 
 // island geometry constants
 const ISLAND_R = 110;        // rolling plateau radius (m)
@@ -136,7 +137,9 @@ export function buildWorld(scene, renderer) {
   scene.add(root);
 
   // ---- sky dome (sunrise palette + The Last Light replaces planet 1) ----
-  const skyGeo = new THREE.SphereGeometry(900, 48, 24);
+  // 32×16 is plenty — the sky shader does its detail per-pixel, the mesh
+  // resolution only affects horizon silhouette tessellation.
+  const skyGeo = new THREE.SphereGeometry(900, 32, 16);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     uniforms: THREE.UniformsUtils.clone(SkyShader.uniforms),
@@ -145,11 +148,12 @@ export function buildWorld(scene, renderer) {
     depthWrite: false,
   });
   skyMat.uniforms.uSunDir.value.copy(SUN_DIR);
-  // sunrise color override: warm coral horizon → peach mid → twilight blue zenith
-  skyMat.uniforms.uHorizon.value.set("#ffc28a");
-  skyMat.uniforms.uMid.value.set("#e8a89c");
-  skyMat.uniforms.uZenith.value.set("#5a6e94");
-  skyMat.uniforms.uSunColor.value.set("#ffe2b0");
+  // early dawn: warm sun-up-soon horizon, dusty mauve mid, soft blue
+  // zenith. Quiet palette but clearly bright enough to read the world.
+  skyMat.uniforms.uHorizon.value.set("#f0b48a");
+  skyMat.uniforms.uMid.value.set("#8a7a8c");
+  skyMat.uniforms.uZenith.value.set("#3a4a6a");
+  skyMat.uniforms.uSunColor.value.set("#f0b890");
   // The Last Light: replaces planet 1 — a fractured glowing lantern, high
   // and in the sunrise direction so the player's eye is drawn to it from
   // the cliff edge. Size starts modest, grows during finale.
@@ -203,12 +207,12 @@ export function buildWorld(scene, renderer) {
     scene.environment = envRT.texture;
     // Keep IBL specular but quieter on diffuse so the SH probe drives
     // the ambient look (we don't want both stacking into a wash).
-    if ("environmentIntensity" in scene) scene.environmentIntensity = 0.45;
+    if ("environmentIntensity" in scene) scene.environmentIntensity = 0.65;
     pmrem.dispose();
 
-    // SH light probe — proper directional ambient
+    // SH light probe — proper directional ambient (early dawn)
     const probe = LightProbeGenerator.fromCubeRenderTarget(renderer, cubeRT);
-    probe.intensity = 0.75;
+    probe.intensity = 1.15;
     root.add(probe);
 
     cubeRT.dispose();
@@ -218,32 +222,37 @@ export function buildWorld(scene, renderer) {
     root.add(new THREE.HemisphereLight(0xffe4b8, 0x6b3a18, 0.42));
   }
 
-  // direct sun — sunrise: warm coral, low intensity (the SH probe carries
-  // most of the soft ambient contour work; sun is for crisp rim/cast).
-  const sun = new THREE.DirectionalLight(0xffc090, 0.85);
+  // direct sun — early dawn: warm low rim light, present and visible.
+  // SH probe carries the soft ambient; sun adds clear directional shape.
+  const sun = new THREE.DirectionalLight(0xf0b890, 0.80);
   sun.position.copy(SUN_DIR).multiplyScalar(120);
   sun.target.position.set(0, 0, 0);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  const sShadow = 55;
+  // 1024² is the right size for an island this small — 2048² + radius 4
+  // + 16 blur samples was costing us ~3-4ms per frame on integrated GPUs
+  // and starving the audio thread.
+  sun.shadow.mapSize.set(1024, 1024);
+  const sShadow = 45;
   sun.shadow.camera.left = -sShadow;
   sun.shadow.camera.right = sShadow;
   sun.shadow.camera.top = sShadow;
   sun.shadow.camera.bottom = -sShadow;
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 280;
+  sun.shadow.camera.far = 220;
   sun.shadow.bias = -0.0006;
   sun.shadow.normalBias = 0.06;
-  // soften the shadow edge — the lightprobes example uses a large
-  // shadow.radius to get that diffuse, ambient feel
-  sun.shadow.radius = 4.0;
-  sun.shadow.blurSamples = 16;
+  sun.shadow.radius = 3.0;
+  sun.shadow.blurSamples = 8;
   root.add(sun);
   root.add(sun.target);
 
   // ---- terrain ----
-  const TERRAIN_SIZE = 900;
-  const TERRAIN_SEGS = 260;
+  // Island plateau is ~110m radius; the cliff falls away at 138m. The
+  // old 900×900 / 260² grid was sized for the giant desert and was
+  // costing us hundreds of thousands of vertices for an island we only
+  // ever sample within 250m. Tighten it.
+  const TERRAIN_SIZE = 360;
+  const TERRAIN_SEGS = 140;
   const terrainGeo = new THREE.PlaneGeometry(
     TERRAIN_SIZE,
     TERRAIN_SIZE,
@@ -326,7 +335,9 @@ export function buildWorld(scene, renderer) {
       const s = stairColliders[i];
       const ddx = x - s.x;
       const ddz = z - s.z;
-      if (ddx * ddx + ddz * ddz > 12) continue;
+      // ~5m early-out — wider than any registered collider half-extent
+      // so we don't false-reject the corner of a big pad
+      if (ddx * ddx + ddz * ddz > 25) continue;
       const lx = ddx * s.cos + ddz * s.sin;
       const lz = -ddx * s.sin + ddz * s.cos;
       if (Math.abs(lx) > s.halfW) continue;
@@ -373,10 +384,10 @@ export function buildWorld(scene, renderer) {
     CLIFF_EDGE: CLIFF_EDGE.clone(),
   };
 
-  // Sunrise haze: warm coral horizon glow blending up into a cooler band.
-  // Same color used for fog and the sand-shader uHaze.
-  scene.background = new THREE.Color("#f4c8a6");
-  scene.fog = new THREE.Fog(0xf4c8a6, 90, 420);
+  // Early-dawn haze: dusky mauve with a real warm horizon. Fog
+  // softens distance into the sky band.
+  scene.background = new THREE.Color("#7a6a78");
+  scene.fog = new THREE.Fog(0x7a6a78, 100, 420);
 
   // ---- voxel props (MagicaVoxel) ----
   // Loaded asynchronously; missing files are skipped gracefully so the
@@ -400,15 +411,15 @@ function makeSandMaterial() {
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime      = { value: 0 };
-    // sunrise haze tint (warm coral) — ground melts into horizon glow
-    shader.uniforms.uHaze      = { value: new THREE.Color("#f4c8a6") };
-    // ground palette: dirt/stone base under sunrise light, with grass-tone
-    // mid and warmer crests (the player sees rolling grass-and-stone)
-    shader.uniforms.uColorLow  = { value: new THREE.Color("#7a6a48") };  // shaded dirt
-    shader.uniforms.uColorMid  = { value: new THREE.Color("#7a8c4a") };  // grass mid
-    shader.uniforms.uColorHigh = { value: new THREE.Color("#c8b876") };  // sunlit grass tips
-    shader.uniforms.uShadow    = { value: new THREE.Color("#3a2a18") };  // exposed rock
-    shader.uniforms.uFogNear   = { value: 90.0 };
+    // early-dawn haze tint (mauve) — ground fades into the soft sky
+    shader.uniforms.uHaze      = { value: new THREE.Color("#7a6a78") };
+    // ground palette: early dawn — clearly readable but cool, with a warm
+    // sun graze on the upper crests.
+    shader.uniforms.uColorLow  = { value: new THREE.Color("#7a6e50") };  // shaded dirt
+    shader.uniforms.uColorMid  = { value: new THREE.Color("#7a8456") };  // grass mid
+    shader.uniforms.uColorHigh = { value: new THREE.Color("#bda878") };  // sun-grazed crests
+    shader.uniforms.uShadow    = { value: new THREE.Color("#3c2c1c") };  // exposed rock
+    shader.uniforms.uFogNear   = { value: 100.0 };
     shader.uniforms.uFogFar    = { value: 420.0 };
 
     shader.vertexShader = shader.vertexShader
@@ -2043,7 +2054,7 @@ function mulberry32(seed) {
   };
 }
 
-export function updateWorld(world, dt, t) {
+export function updateWorld(world, dt, t, player, audio) {
   if (world.sandMat.userData.shader) {
     world.sandMat.userData.shader.uniforms.uTime.value = t;
   }
@@ -2053,7 +2064,7 @@ export function updateWorld(world, dt, t) {
   world.shrine?.update?.(dt, t);
 
   // cliff props (windmills, banners, fragments, wind stones, bridges)
-  if (world.cliffs) updateCliffs(world.cliffs, dt, t);
+  if (world.cliffs) updateCliffs(world.cliffs, dt, t, player, audio);
 
   // birds circling
   if (world.birds) updateBirds(world.birds, dt, t);
