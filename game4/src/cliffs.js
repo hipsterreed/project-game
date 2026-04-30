@@ -399,16 +399,12 @@ export function updateCliffs(cliffs, dt, t, player, audio) {
       pad.mesh.scale.setScalar(eased);
       pad.mat.opacity = 0.55 + eased * 0.4;
 
-      // ---- step-on reaction + lantern proximity ----
-      let lanternProx = 0;
-      if (pp && eased > 0.85) {
+      // ---- step-on reaction ----
+      if (pp && local > 0.35) {
         const dxp = pp.x - pad.mesh.position.x;
         const dzp = pp.z - pad.mesh.position.z;
         const dyp = pp.y - pad.targetY;
         const dxz = Math.hypot(dxp, dzp);
-        // lantern glow falls off with overall distance to the pad
-        const dist = Math.hypot(dxz, dyp);
-        lanternProx = Math.max(0, 1 - dist / 4.5);
         // step-on: player feet within pad disc, just above its surface
         if (dxz < pad.colliderHalfW + 0.4 && dyp > -0.2 && dyp < 1.6) {
           if (!pad.played) {
@@ -426,11 +422,9 @@ export function updateCliffs(cliffs, dt, t, player, audio) {
       pad.pressedVel += accel * dt;
       pad.pressed   += pad.pressedVel * dt;
 
-      // emissive composes a dim base + lit-up boost + lantern proximity glow
-      const baseEm  = 0.12;
-      const litEm   = pad.lit * 1.2;
-      const lampEm  = lanternProx * 0.7;
-      pad.mat.emissiveIntensity = (baseEm + litEm + lampEm) * (0.35 + eased * 0.65);
+      // emissive: only lights up when stepped on
+      const litEm = pad.lit * 0.38;
+      pad.mat.emissiveIntensity = litEm * (0.35 + eased * 0.65);
 
       // pad position: gentle bob + spring offset
       const bob = Math.sin(t * 0.7 + pad.bobPhase) * 0.12;
@@ -439,8 +433,8 @@ export function updateCliffs(cliffs, dt, t, player, audio) {
       // collider follows so the player rides the pad as it bobs/presses
       if (pad.colliderRef) pad.colliderRef.y = padY + 0.09;
 
-      // toggle collider when fully present
-      if (eased > 0.85 && !pad.colliderEnabled) {
+      // toggle collider once pad has meaningfully appeared
+      if (local > 0.35 && !pad.colliderEnabled) {
         pad.colliderEnabled = true;
         pad.colliderRef.halfW = pad.colliderHalfW;
         pad.colliderRef.halfD = pad.colliderHalfD;
@@ -522,9 +516,9 @@ function buildWindBridge({ getTerrainHeight }) {
     // player steps on it. Bigger discs so jumping between them is forgiving.
     const padGeo = new THREE.CylinderGeometry(2.1, 1.9, 0.22, 22, 1);
     const padMat = new THREE.MeshStandardMaterial({
-      color: 0xfff0c4,
-      emissive: 0xffd9a0,
-      emissiveIntensity: 0.12,
+      color: 0xffc890,
+      emissive: 0xffc890,
+      emissiveIntensity: 0.0,
       roughness: 0.55,
       transparent: true,
       opacity: 0.0,

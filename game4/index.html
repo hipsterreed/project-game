@@ -252,6 +252,46 @@
         animation: pulse 2.6s ease-in-out infinite;
       }
 
+      /* ---- menu overlay (shown after load, before cinematic) ---- */
+      #menuOverlay {
+        position: fixed; inset: 0;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        background: linear-gradient(to top, rgba(0,0,0,0.5) 0%, transparent 55%);
+        z-index: 5;
+        pointer-events: auto;
+        transition: opacity 1.4s ease;
+      }
+      #menuOverlay.gone { opacity: 0; pointer-events: none; }
+      #menuOverlay .menu-title {
+        position: absolute;
+        top: 22%;
+        font-size: clamp(28px, 5vw, 62px);
+        font-weight: 200;
+        letter-spacing: 0.45em;
+        color: rgba(244, 212, 154, 0.82);
+        text-shadow: 0 0 40px rgba(255, 190, 100, 0.25), 0 2px 18px rgba(0,0,0,0.7);
+        margin-right: -0.45em;
+      }
+      #menuBeginBtn {
+        position: absolute;
+        bottom: 12%;
+        background: var(--warm);
+        border: none;
+        color: var(--deep);
+        font: inherit;
+        font-size: 12px;
+        letter-spacing: 0.55em;
+        text-transform: uppercase;
+        padding: 14px 48px;
+        cursor: pointer;
+        transition: background 0.3s ease, letter-spacing 0.3s ease;
+      }
+      #menuBeginBtn:hover {
+        background: var(--gold);
+        letter-spacing: 0.65em;
+      }
+
       @keyframes fadeIn { to { opacity: 1; } }
       @keyframes pulse {
         0%, 100% { opacity: 0.2; transform: scale(0.7); }
@@ -283,6 +323,11 @@
     </div>
 
     <div id="ending"></div>
+
+    <div id="menuOverlay">
+      <h1 class="menu-title">The Quiet Cliffs</h1>
+      <button id="menuBeginBtn">begin</button>
+    </div>
 
     <div id="loading"><div class="dot"></div></div>
 

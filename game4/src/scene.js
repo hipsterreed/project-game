@@ -328,6 +328,7 @@ export function buildWorld(scene, renderer) {
   const clouds = buildClouds();
   root.add(clouds.group);
 
+
   // ---- distant silhouette range (kept; reads as far cliff face) ----
   const range = buildDistantRange();
   root.add(range);
@@ -335,12 +336,44 @@ export function buildWorld(scene, renderer) {
   // colliders contributed by cliff props (bridge planks act like stairs)
   const stairColliders = cliffs.colliders || [];
 
+  // Lamp post bases: each collar is a small raised disc the player can step onto.
+  // halfW/halfD = 0.42 covers the player footprint (player_r 0.30 + pole blocker 0.12).
+  for (const lp of lampPosts) {
+    stairColliders.push({
+      x: lp.group.position.x,
+      z: lp.group.position.z,
+      y: lp.group.position.y + 0.14,  // top of collar (CylinderGeometry height 0.14)
+      halfW: 0.42,
+      halfD: 0.42,
+      cos: 1,
+      sin: 0,
+    });
+  }
+
+  // Disc colliders: large circular walkable surfaces (e.g. sky island).
+  // Checked radially; bypass the 5m early-out used by box stairColliders.
+  const discColliders = [];
+  const _islePos = cliffs.skyIsland.group.position;
+  discColliders.push({
+    x: _islePos.x,
+    z: _islePos.z,
+    y: _islePos.y + 0.5,   // top of island disc (TOP_THICK/2 = 0.5)
+    radius: 17,
+  });
+
   /* World height query that includes prop colliders (e.g. bridge planks,
    * later: wind-bridge stepping pads). fromY caps which colliders are
    * eligible (you can't snap up onto a plank far above your head). */
   function surfaceY(x, z, fromY) {
     let y = getTerrainHeight(x, z);
     if (fromY === undefined) return y;
+
+    for (const d of discColliders) {
+      const ddx = x - d.x, ddz = z - d.z;
+      if (ddx * ddx + ddz * ddz > d.radius * d.radius) continue;
+      if (d.y > fromY + 0.9) continue;
+      if (d.y > y) y = d.y;
+    }
 
     for (let i = 0; i < stairColliders.length; i++) {
       const s = stairColliders[i];
@@ -359,12 +392,14 @@ export function buildWorld(scene, renderer) {
     return y;
   }
 
-  // Hard cylinder blockers: lamp post bases (collar radius 0.18 + margin).
+  // Hard cylinder blockers: just the pole shaft (collar walkable via stairColliders above).
   const columnBlockers = lampPosts.map(lp => ({
     x: lp.group.position.x,
     z: lp.group.position.z,
-    r: 0.22,
+    r: 0.12,
   }));
+  // lighthouse tower on sky island — large enough to block the player from walking through it
+  columnBlockers.push({ x: _islePos.x, z: _islePos.z, r: 2.4 });
 
   function blocksColumn(x, z) {
     for (const c of columnBlockers) {
@@ -388,10 +423,12 @@ export function buildWorld(scene, renderer) {
     cliffs,
     birds,
     clouds,
+
     grass,
     archTrigger: SHRINE_POSITION.clone(),  // legacy alias for resonance
     footprintLayer,
     stairColliders,
+    discColliders,
     columnBlockers,
     getHeight: getTerrainHeight,
     getTerrainHeight,
@@ -871,11 +908,11 @@ function buildDistantMountains() {
   group.add(buildRidge({
     radius: 1020,
     segs: 800,
-    baseY: -100,
+    baseY: -180,
     peakLow: 160,
     peakHigh: 450,
-    baseColor: "#b8a8b0",
-    peakColor: "#fff0d8",
+    baseColor: "#b29498",
+    peakColor: "#ffd9b0",
     radialJitter: 0.04,
     octaves: [
       { freq: 1.2,  amp: 0.55 },
@@ -893,11 +930,11 @@ function buildDistantMountains() {
   group.add(buildRidge({
     radius: 760,
     segs: 660,
-    baseY: -80,
+    baseY: -160,
     peakLow: 90,
     peakHigh: 300,
-    baseColor: "#7a5c6c",
-    peakColor: "#e8c09a",
+    baseColor: "#8a6878",
+    peakColor: "#e6b890",
     radialJitter: 0.05,
     octaves: [
       { freq: 1.4,  amp: 0.55 },
@@ -914,11 +951,11 @@ function buildDistantMountains() {
   group.add(buildRidge({
     radius: 540,
     segs: 580,
-    baseY: -60,
+    baseY: -140,
     peakLow: 50,
     peakHigh: 190,
-    baseColor: "#3e2c2e",
-    peakColor: "#c88050",
+    baseColor: "#5a3e3c",
+    peakColor: "#d99868",
     radialJitter: 0.08,
     octaves: [
       { freq: 2.1,  amp: 0.50 },

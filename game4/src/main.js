@@ -131,7 +131,7 @@ composer.addPass(new OutputPass());
 /* -----------------------------------------------------------
  * State machine
  * --------------------------------------------------------- */
-let mode = "intro";            // intro → exploring → restoring → ascending → finale → done
+let mode = "menu";             // menu → intro → exploring → restoring → ascending → finale → done
 let stateTime = 0;             // seconds since this state began
 let firstInputAt = 0;          // when the player first touched a key/mouse
 
@@ -153,11 +153,12 @@ function arm() {
 
 window.addEventListener("pointerdown", () => {
   arm();
-  if (mode === "intro") return;
+  if (mode === "menu" || mode === "intro") return;
   noteFirstInput();
 });
 window.addEventListener("keydown", (e) => {
   arm();
+  if (mode === "menu") { beginGame(); return; }
   if (mode === "intro") { skipIntro(); return; }
   noteFirstInput();
   if (e.code === "KeyE") {
@@ -173,7 +174,6 @@ function noteFirstInput() {
   if (firstInputAt > 0) return;
   firstInputAt = clock.getElapsedTime();
   renderer.domElement.requestPointerLock?.();
-  showTitle("The Quiet Cliffs", 0.5, 4.0, 1.5);
 }
 
 
@@ -202,10 +202,10 @@ function showTitle(text, fadeInDelay, hold, fadeDur) {
   if (!titleEl2) {
     titleEl2 = document.createElement("div");
     titleEl2.style.position = "fixed";
-    titleEl2.style.inset = "0";
-    titleEl2.style.display = "flex";
-    titleEl2.style.alignItems = "center";
-    titleEl2.style.justifyContent = "center";
+    titleEl2.style.top = "30%";
+    titleEl2.style.left = "0";
+    titleEl2.style.right = "0";
+    titleEl2.style.textAlign = "center";
     titleEl2.style.color = "rgba(255, 240, 220, 0.92)";
     titleEl2.style.font = "300 38px/1.2 Georgia, serif";
     titleEl2.style.letterSpacing = "0.18em";
@@ -638,6 +638,17 @@ function _introFlicker(t, seed) {
   return Math.abs(Math.sin(t * 23.1 + seed) * Math.cos(t * 13.7 + seed * 1.9));
 }
 
+// Slow, organic flicker — feels like a weakening flame.
+// Three overlapping low-frequency waves; the product creates natural
+// dim-dips without ever going fully dark, cycling roughly every 4–8s.
+function _slowFlicker(t) {
+  const a = Math.sin(t * 1.7)  * 0.5 + 0.5;  // ~0.27 Hz slow pulse
+  const b = Math.sin(t * 3.9 + 1.3) * 0.5 + 0.5;  // ~0.62 Hz flutter
+  const c = Math.sin(t * 0.55 + 2.6) * 0.5 + 0.5; // ~0.09 Hz long breath
+  // pow < 1 keeps it mostly bright but lets the dips drop low
+  return Math.pow(a * b * c, 0.35);
+}
+
 const _INTRO_LINES = [
   "the lights are going out",
   "who will bear the light",
@@ -670,14 +681,59 @@ function _ensureIntroTitle() {
   if (_introTitleEl) return _introTitleEl;
   _introTitleEl = document.createElement("div");
   _introTitleEl.style.cssText =
-    "position:fixed;top:40px;right:48px;text-align:right;" +
-    "font:300 20px/1.5 Georgia,serif;letter-spacing:0.32em;" +
+    "position:fixed;top:88px;left:0;right:0;text-align:center;" +
+    "font:300 38px/1.2 Georgia,serif;letter-spacing:0.18em;" +
     "color:rgba(255,238,210,0.88);opacity:0;pointer-events:none;" +
     "text-shadow:0 0 20px rgba(255,150,40,0.4),0 0 5px rgba(0,0,0,0.85);" +
     "transition:opacity 1.6s ease-in-out;z-index:56;user-select:none;";
   _introTitleEl.textContent = "The Quiet Cliffs";
   document.body.appendChild(_introTitleEl);
   return _introTitleEl;
+}
+
+const _menuOverlayEl = document.getElementById("menuOverlay");
+
+function beginGame() {
+  if (mode !== "menu") return;
+  arm();
+  _menuOverlayEl?.classList.add("gone");
+  renderer.toneMappingExposure = 1.0;
+  mode = "intro";
+  stateTime = 0;
+}
+
+/* -----------------------------------------------------------
+ * Menu: game world is live, camera drifts at the lighthouse.
+ * Clicking "begin" transitions to the cinematic seamlessly
+ * since the menu camera is the same position as FLICKER phase.
+ * --------------------------------------------------------- */
+function menuUpdate(dt, t) {
+  const si = world.cliffs?.skyIsland;
+  const f = _slowFlicker(t);
+  if (si?.lampMat) {
+    si.lampMat.opacity = 0.12 + f * 0.78;
+    si.lampMat.color.setRGB(1.0, 0.65 + f * 0.30, 0.25 + f * 0.45);
+  }
+  if (si?.haloMat) si.haloMat.opacity = 0.25 * (0.1 + f * 0.9);
+
+  const lamps = world.lampPosts;
+  if (lamps) {
+    for (const lp of lamps) {
+      lp.glassMat.emissiveIntensity = 1.4;
+      lp.glassMat.opacity = 0.9;
+      lp.haloMat.opacity = 0.38;
+    }
+  }
+
+  renderer.toneMappingExposure = 1.5;
+
+  // gentle drift at the lighthouse — same base position as FLICKER phase
+  camera.position.set(
+    1.5 + Math.sin(t * 0.13) * 0.6,
+    54.5 + Math.sin(t * 0.09 + 1.3) * 0.25,
+    -222,
+  );
+  camera.lookAt(0, 53.8, -240);
 }
 
 function introUpdate(dt, t) {
@@ -693,9 +749,10 @@ function introUpdate(dt, t) {
     }
     if (si?.haloMat) si.haloMat.opacity = 0.22 * (0.4 + f * 0.6);
 
-  } else if (stateTime < INTRO_ZOOM_AT + 0.5) {
-    // quick extinction — light dies as the camera starts to pull back
-    const dying = 1 - (stateTime - INTRO_ZOOM_AT) / 0.5;
+  } else if (stateTime < INTRO_ZOOM_AT + 1.8) {
+    // slow graceful fade-out as camera pulls back — ease-in so it lingers
+    const raw = (stateTime - INTRO_ZOOM_AT) / 1.8;
+    const dying = 1 - raw * raw;   // ease-in: slow at first, faster at end
     if (si?.lampMat) {
       si.lampMat.opacity = dying * 0.9;
       si.lampMat.color.setRGB(1.0, 0.7 * dying, 0.3 * dying);
@@ -756,9 +813,9 @@ function introUpdate(dt, t) {
     lines[i].style.opacity = (stateTime >= show && stateTime < hide) ? "1" : "0";
   }
 
-  const titleEl3 = _ensureIntroTitle();
-  const showGameTitle = stateTime >= 7.0 && stateTime < INTRO_END - 0.4;
-  titleEl3.style.opacity = showGameTitle ? "1" : "0";
+  if (!titleEl2 && stateTime >= INTRO_END - 2.0) {
+    showTitle("The Quiet Cliffs", 0, 3.5, 1.4);
+  }
 
   if (!_restoreMusicPlayed && stateTime >= 2.0) {
     _restoreMusicPlayed = true;
@@ -782,7 +839,6 @@ function endIntro() {
 
   // hide text
   if (_introLineEls) _introLineEls.forEach(el => el.style.opacity = "0");
-  if (_introTitleEl) _introTitleEl.style.opacity = "0";
 
   // freeze all lamps dark — player lights them by carrying the shrine flame
   const lamps = world.lampPosts;
@@ -995,33 +1051,199 @@ function finaleUpdate(dt, t) {
   }
 }
 
-/* Lighthouse-reach ending — once the player makes it onto the sky island
- * and is close to the lighthouse, fade to white and show "to be continued". */
-let lighthouseReached = false;
-function maybeFinishOnLighthouse() {
-  if (lighthouseReached) return;
+/* -----------------------------------------------------------
+ * Island cinematic — fires when the player walks up to the lighthouse
+ * on the sky island. Locks player input, walks them to the base,
+ * has them raise and throw the lantern; a flame mote arcs up and
+ * the lighthouse ignites dramatically.
+ *
+ * Phases (seconds):
+ *   WALK  (2.2) — auto-walk toward lighthouse base
+ *   RAISE (1.0) — lantern rises overhead
+ *   THROW (1.2) — mote arcs from lantern up to the lamp
+ *   LIGHT (0.6) — lamp ignites, bloom bursts
+ *   HOLD  (2.0) — camera holds on the lit lighthouse
+ *   FADE  (1.8) — fade to white → "to be continued"
+ * --------------------------------------------------------- */
+const IC_WALK  = 2.2;
+const IC_RAISE = 1.0;
+const IC_THROW = 1.2;
+const IC_LIGHT = 0.6;
+const IC_HOLD  = 2.0;
+const IC_FADE  = 1.8;
+
+let islandCine = null;
+
+function maybeStartIslandCinematic() {
+  if (islandCine) return;
   const isle = world.cliffs?.skyIsland?.group?.position;
   if (!isle) return;
   const dx = player.position.x - isle.x;
   const dz = player.position.z - isle.z;
   const dy = player.position.y - isle.y;
-  // on the disc (within ~6m of the lighthouse base) and at island height
-  if (Math.hypot(dx, dz) < 6.0 && dy > -1.0 && dy < 6.0) {
-    lighthouseReached = true;
-    mode = "ending";
+  if (Math.hypot(dx, dz) < 6.0 && dy > 0.0 && dy < 7.0) {
+    mode = "islandCinematic";
     stateTime = 0;
     player.canControl = false;
+
+    // approach: stand 2.8m south of lighthouse centre on island surface
+    const approachTarget = new THREE.Vector3(isle.x, isle.y + 0.5, isle.z + 2.8);
+    // lighthouse lamp world position: tower y-offset (0.5) + LAMP_Y (11.25)
+    const lampWorldPos = new THREE.Vector3(isle.x, isle.y + 11.75, isle.z);
+
+    islandCine = {
+      t0: clock.getElapsedTime(),
+      startPos: player.position.clone(),
+      approachTarget,
+      facingYaw: Math.PI,   // face toward -z (lighthouse)
+      lampWorldPos,
+      mote: null,
+      moteStart: null,
+      lightIgnited: false,
+      lighthouseLight: null,
+    };
   }
 }
 
-function endingUpdate(dt) {
-  const fadeT = THREE.MathUtils.clamp(stateTime / 1.8, 0, 1);
-  const ov = ensureFadeOverlay();
-  ov.style.opacity = `${fadeT}`;
-  if (fadeT >= 1.0 && mode !== "done") {
-    mode = "done";
-    showEnd("to be continued");
+function updateIslandCinematic(t, dt) {
+  if (!islandCine) return;
+  const ic = islandCine;
+  const elapsed = t - ic.t0;
+
+  const walkEnd  = IC_WALK;
+  const raiseEnd = walkEnd  + IC_RAISE;
+  const throwEnd = raiseEnd + IC_THROW;
+  const lightEnd = throwEnd + IC_LIGHT;
+  const holdEnd  = lightEnd + IC_HOLD;
+  const fadeEnd  = holdEnd  + IC_FADE;
+
+  const islandPos = world.cliffs.skyIsland.group.position;
+  const pp = player.position;
+
+  // ---- camera ----
+  if (elapsed < raiseEnd) {
+    // behind player, framing the lighthouse tower
+    _camIdealPos.set(pp.x, pp.y + 4.5, pp.z + 8);
+    camera.position.lerp(_camIdealPos, dt * 2.0);
+    camera.lookAt(pp.x, pp.y + 8, islandPos.z);
+  } else if (elapsed < throwEnd) {
+    // pull back and rise to frame player + full lighthouse as mote ascends
+    const u = (elapsed - raiseEnd) / IC_THROW;
+    _camIdealPos.set(pp.x + 5, pp.y + 6 + u * 4, pp.z + 10 + u * 4);
+    camera.position.lerp(_camIdealPos, dt * 1.4);
+    camera.lookAt(pp.x, pp.y + 6 + u * 5, islandPos.z);
+  } else {
+    // wide cinematic shot on the lit lighthouse
+    _camIdealPos.set(islandPos.x + 10, islandPos.y + 18, islandPos.z + 26);
+    camera.position.lerp(_camIdealPos, dt * 0.8);
+    camera.lookAt(islandPos.x, islandPos.y + 10, islandPos.z);
   }
+
+  // ---- WALK: auto-walk to lighthouse approach ----
+  if (elapsed < walkEnd) {
+    const u = elapsed / walkEnd;
+    const eased = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+    _approachTmp.lerpVectors(ic.startPos, ic.approachTarget, eased);
+    _approachTmp.y = ic.approachTarget.y;
+    const prevX = player.position.x;
+    const prevZ = player.position.z;
+    player.position.copy(_approachTmp);
+    player.velocity.x = (player.position.x - prevX) / Math.max(dt, 1e-4);
+    player.velocity.z = (player.position.z - prevZ) / Math.max(dt, 1e-4);
+    player.velocity.y = 0;
+    player.bodyYaw = lerpAngle(player.bodyYaw, ic.facingYaw, Math.min(1, dt * 4));
+    player.lanternRaise = 0;
+    return;
+  }
+
+  player.velocity.set(0, 0, 0);
+  player.bodyYaw = lerpAngle(player.bodyYaw, ic.facingYaw, Math.min(1, dt * 6));
+
+  // ---- RAISE: lift lantern overhead ----
+  if (elapsed < raiseEnd) {
+    const u = (elapsed - walkEnd) / IC_RAISE;
+    player.lanternRaise = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+    return;
+  }
+
+  // ---- THROW: mote arcs from lantern up to lighthouse lamp ----
+  if (elapsed < throwEnd) {
+    player.lanternRaise = 1;
+    if (!ic.mote) {
+      if (player.heldLanternCore) {
+        player.heldLanternCore.getWorldPosition(_flameTarget);
+      } else {
+        _flameTarget.copy(player.position);
+        _flameTarget.y += 2.4;
+      }
+      ic.moteStart = _flameTarget.clone();
+      ic.mote = makeFlameMote(ic.moteStart);
+    }
+    const u = (elapsed - raiseEnd) / IC_THROW;
+    ic.mote.position.lerpVectors(ic.moteStart, ic.lampWorldPos, u);
+    ic.mote.position.y += Math.sin(u * Math.PI) * 3.0;   // dramatic high arc
+    ic.mote.material.opacity = u < 0.82 ? 1.0 : Math.max(0, 1.0 - (u - 0.82) / 0.18);
+    ic.mote.scale.setScalar(1 + u * 0.6);                // grow as it rises
+    player.heldLanternFlame = Math.max(0, 1.0 - u);
+    return;
+  }
+
+  player.lanternRaise = 0;
+  player.heldLanternFlame = 0;
+
+  // ---- LIGHT: lamp ignites, bloom burst ----
+  if (elapsed < lightEnd) {
+    if (!ic.lightIgnited) {
+      ic.lightIgnited = true;
+      if (ic.mote) {
+        scene.remove(ic.mote);
+        ic.mote.geometry.dispose();
+        ic.mote.material.dispose();
+        ic.mote = null;
+      }
+      const si = world.cliffs.skyIsland;
+      si.lampMat.opacity = 0.88;
+      si.lampMat.color.setRGB(1.0, 0.88, 0.62);
+      if (si.haloMat) si.haloMat.opacity = (si.haloMat.userData.baseOpacity ?? 0.22) * 3;
+      ic.lighthouseLight = new THREE.PointLight(0xffc890, 12.0, 90, 1.4);
+      ic.lighthouseLight.position.copy(ic.lampWorldPos);
+      scene.add(ic.lighthouseLight);
+      audio.playLampLight?.();
+    }
+    const u = (elapsed - throwEnd) / IC_LIGHT;
+    bloom.strength = 0.5 + (1 - u) * 2.0;
+    if (ic.lighthouseLight) ic.lighthouseLight.intensity = 12.0 * (0.25 + 0.75 * (1 - u));
+    return;
+  }
+
+  // ---- HOLD: settle on the lit lighthouse ----
+  if (elapsed < holdEnd) {
+    bloom.strength = THREE.MathUtils.damp(bloom.strength, 0.65, 3, dt);
+    if (ic.lighthouseLight) {
+      ic.lighthouseLight.intensity = THREE.MathUtils.lerp(3.0, 1.4,
+        (elapsed - lightEnd) / IC_HOLD);
+    }
+    return;
+  }
+
+  // ---- FADE: to white → "to be continued" ----
+  if (elapsed < fadeEnd) {
+    bloom.strength = 0.5;
+    const u = (elapsed - holdEnd) / IC_FADE;
+    const ov = ensureFadeOverlay();
+    ov.style.background = "white";
+    ov.style.opacity = `${Math.min(1, u * 1.15)}`;
+    if (u >= 0.88 && mode !== "done") {
+      mode = "done";
+      showEnd("to be continued");
+    }
+    return;
+  }
+
+  // complete
+  bloom.strength = 0.5;
+  mode = "done";
+  islandCine = null;
 }
 
 /* -----------------------------------------------------------
@@ -1043,7 +1265,9 @@ function animate() {
   flickerLitLamps(t);
 
   // ---- player update with state-aware overrides ----
-  if (mode === "intro") {
+  if (mode === "menu") {
+    menuUpdate(dt, t);
+  } else if (mode === "intro") {
     introUpdate(dt, t);
   } else if (mode === "exploring") {
     player.update(dt, t);
@@ -1081,10 +1305,10 @@ function animate() {
     if (shadowsCooldown === 0 && player.position.y < FOG_DEATH_Y) {
       fallToShadows();
     }
-    maybeFinishOnLighthouse();
-  } else if (mode === "ending") {
+    maybeStartIslandCinematic();
+  } else if (mode === "islandCinematic") {
     player.update(dt, t);
-    endingUpdate(dt);
+    updateIslandCinematic(t, dt);
   } else {
     // "done" — keep updating particles + cloak so the final shot is alive
     player.update(dt, t);
@@ -1116,7 +1340,7 @@ function animate() {
   // restoration animation drivers (cliff props)
   if (
     mode === "restoring" || mode === "ascending" || mode === "finale" ||
-    mode === "traversing" || mode === "ending" || mode === "done"
+    mode === "traversing" || mode === "islandCinematic" || mode === "done"
   ) {
     const since = (mode === "restoring") ? stateTime : Math.max(stateTime + 6, 6);
     world.cliffs?.setRestoring(THREE.MathUtils.clamp(since / 2.5, 0, 1));
@@ -1167,4 +1391,5 @@ window.addEventListener("resize", () => {
 
 // ---- kick off ----
 loading?.classList.add("gone");
+document.getElementById("menuBeginBtn")?.addEventListener("click", beginGame, { once: true });
 animate();

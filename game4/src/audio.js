@@ -424,32 +424,45 @@ export class Audio {
   update(dt, t, opts) {
     if (!this.ctx) return;
     const ctx = this.ctx;
+
+    // Resume the context if the browser auto-suspended it (e.g. tab blur,
+    // inactivity timeout). This is safe to call every frame — it's a no-op
+    // when the context is already running.
+    if (ctx.state === "suspended") ctx.resume();
+
     const now = ctx.currentTime;
 
-    // wind responds to player speed (opts.speed) and time-of-day LFO.
-    // Quieter overall — was a fairly loud bed; now a soft background.
+    // wind responds to player speed
     const speed = opts.speed || 0;
     const targetWind = 0.05 + Math.min(1, speed / 9) * 0.07 + (opts.gustExtra || 0);
     if (this.windBase?.gain) {
-      this.windBase.gain.gain.setTargetAtTime(targetWind, now, 0.4);
-    }
-    if (this.windGust?.gain) {
-      // gust LFO is already handled inside; keep base near 0.07.
+      // cancelAndHoldAtTime clears the queued-automation backlog that
+      // accumulates when setTargetAtTime is called every frame (~60/s).
+      // Without the cancel the queue grows unbounded and causes dropouts.
+      const p = this.windBase.gain.gain;
+      p.cancelAndHoldAtTime(now);
+      p.setTargetAtTime(targetWind, now, 0.4);
     }
 
     // slide hiss
     const slideAmt = opts.sliding ? Math.min(1, speed / 9) * 0.5 : 0;
     if (this.slideGain) {
-      this.slideGain.gain.setTargetAtTime(slideAmt, now, 0.05);
+      const p = this.slideGain.gain;
+      p.cancelAndHoldAtTime(now);
+      p.setTargetAtTime(slideAmt, now, 0.05);
     }
 
     // chime + drone proximity
     const prox = opts.archProximity || 0;
     if (this.chimeGain) {
-      this.chimeGain.gain.setTargetAtTime(prox * 0.18, now, 1.5);
+      const p = this.chimeGain.gain;
+      p.cancelAndHoldAtTime(now);
+      p.setTargetAtTime(prox * 0.18, now, 1.5);
     }
     if (this.droneGain) {
-      this.droneGain.gain.setTargetAtTime(0.05 + prox * 0.18, now, 1.5);
+      const p = this.droneGain.gain;
+      p.cancelAndHoldAtTime(now);
+      p.setTargetAtTime(0.05 + prox * 0.18, now, 1.5);
     }
   }
 
