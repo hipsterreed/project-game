@@ -45,6 +45,19 @@ export class Audio {
     this.musicStarted = false;
     this._tryAutoplay();
 
+    // If the browser silently pauses the music (e.g. media session interruption,
+    // OS audio focus loss), kick playback again. We only restart when we didn't
+    // intentionally stop it (fadeOut sets _intentionalPause).
+    this._intentionalPause = false;
+    this.music.addEventListener("pause", () => {
+      if (!this._intentionalPause && this.musicStarted) {
+        this.music.play().catch(() => {});
+      }
+    });
+    this.music.addEventListener("stalled", () => {
+      if (this.musicStarted) this.music.load();
+    });
+
     // params we react to externally
     this.windStrength = 0.0;
     this.slideStrength = 0.0;
@@ -248,6 +261,17 @@ export class Audio {
 
     // ----- music: started muted at page load; unmute + fade in now -----
     this._unmuteMusic();
+
+    // Re-resume the AudioContext and music when the tab comes back into view.
+    // Browsers auto-suspend the AudioContext (and sometimes pause HTMLAudio)
+    // when the tab is backgrounded.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      if (this.ctx?.state === "suspended") this.ctx.resume().catch(() => {});
+      if (this.musicStarted && this.music?.paused) {
+        this.music.play().catch(() => {});
+      }
+    });
   }
 
   /* short, single-trigger sounds */
@@ -420,6 +444,17 @@ export class Audio {
     }
   }
 
+  // cancelAndHoldAtTime with fallback for older Safari / Firefox
+  _cancelAndHold(param, now) {
+    if (typeof param.cancelAndHoldAtTime === "function") {
+      param.cancelAndHoldAtTime(now);
+    } else {
+      const v = param.value;
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(v, now);
+    }
+  }
+
   /* per-frame parameter updates from main */
   update(dt, t, opts) {
     if (!this.ctx) return;
@@ -428,7 +463,7 @@ export class Audio {
     // Resume the context if the browser auto-suspended it (e.g. tab blur,
     // inactivity timeout). This is safe to call every frame — it's a no-op
     // when the context is already running.
-    if (ctx.state === "suspended") ctx.resume();
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
 
     const now = ctx.currentTime;
 
@@ -436,11 +471,11 @@ export class Audio {
     const speed = opts.speed || 0;
     const targetWind = 0.05 + Math.min(1, speed / 9) * 0.07 + (opts.gustExtra || 0);
     if (this.windBase?.gain) {
-      // cancelAndHoldAtTime clears the queued-automation backlog that
-      // accumulates when setTargetAtTime is called every frame (~60/s).
-      // Without the cancel the queue grows unbounded and causes dropouts.
+      // _cancelAndHold clears the queued-automation backlog that accumulates
+      // when setTargetAtTime is called every frame (~60/s). Without the cancel
+      // the queue grows unbounded and causes dropouts.
       const p = this.windBase.gain.gain;
-      p.cancelAndHoldAtTime(now);
+      this._cancelAndHold(p, now);
       p.setTargetAtTime(targetWind, now, 0.4);
     }
 
@@ -448,7 +483,7 @@ export class Audio {
     const slideAmt = opts.sliding ? Math.min(1, speed / 9) * 0.5 : 0;
     if (this.slideGain) {
       const p = this.slideGain.gain;
-      p.cancelAndHoldAtTime(now);
+      this._cancelAndHold(p, now);
       p.setTargetAtTime(slideAmt, now, 0.05);
     }
 
@@ -456,12 +491,12 @@ export class Audio {
     const prox = opts.archProximity || 0;
     if (this.chimeGain) {
       const p = this.chimeGain.gain;
-      p.cancelAndHoldAtTime(now);
+      this._cancelAndHold(p, now);
       p.setTargetAtTime(prox * 0.18, now, 1.5);
     }
     if (this.droneGain) {
       const p = this.droneGain.gain;
-      p.cancelAndHoldAtTime(now);
+      this._cancelAndHold(p, now);
       p.setTargetAtTime(0.05 + prox * 0.18, now, 1.5);
     }
   }
@@ -473,6 +508,7 @@ export class Audio {
       this.master.gain.setTargetAtTime(0.0, now, seconds * 0.5);
     }
     if (this.music) {
+      this._intentionalPause = true;
       const startVol = this.music.volume;
       const t0 = performance.now();
       const ms = seconds * 1000;
@@ -488,6 +524,7 @@ export class Audio {
 
   /* swell back up after a fadeOut (used for restoration / finale) */
   fadeIn(seconds = 3, target = 0.85, musicTarget = 0.55) {
+    this._intentionalPause = false;
     if (this.ctx && this.master) {
       const now = this.ctx.currentTime;
       this.master.gain.setTargetAtTime(target, now, seconds * 0.5);
@@ -508,9 +545,9 @@ export class Audio {
 
   /* ----- helpers ----- */
 
-  _whiteNoise(seconds = 4) {
+  _whiteNoise(seconds = 30) {
     const ctx = this.ctx;
-    const buffer = ctx.createBuffer(1, ctx.sampleRate * seconds, ctx.sampleRate);
+    const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * seconds), ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
     const src = ctx.createBufferSource();
@@ -520,15 +557,23 @@ export class Audio {
     return src;
   }
 
-  _brownNoise(seconds = 4) {
+  _brownNoise(seconds = 30) {
     const ctx = this.ctx;
-    const buffer = ctx.createBuffer(1, ctx.sampleRate * seconds, ctx.sampleRate);
+    const len = Math.floor(ctx.sampleRate * seconds);
+    const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = buffer.getChannelData(0);
     let last = 0;
-    for (let i = 0; i < data.length; i++) {
+    for (let i = 0; i < len; i++) {
       const w = Math.random() * 2 - 1;
       last = (last + 0.02 * w) / 1.02;
       data[i] = last * 3.5;
+    }
+    // Crossfade the tail to zero so the loop point is click-free.
+    // The buffer starts near 0 (last=0 at sample 0), so fading the last
+    // ~93ms of samples to 0 eliminates the discontinuity at wrap-around.
+    const fadeLen = Math.min(4096, len >> 2);
+    for (let i = 0; i < fadeLen; i++) {
+      data[len - fadeLen + i] *= 1 - i / fadeLen;
     }
     const src = ctx.createBufferSource();
     src.buffer = buffer;

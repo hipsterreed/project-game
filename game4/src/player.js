@@ -131,6 +131,10 @@ export class Player {
     this.bodyYaw = 0;
     this.targetYaw = 0;
     this.cameraYaw = 0;
+
+    // idle camera pan state
+    this._idleTimer = 0;
+    this._idlePanning = false;
   }
 
   _buildHood() {
@@ -933,6 +937,7 @@ export class Player {
     dt = Math.min(dt, 1 / 30);
 
     // ---- camera input (mouse) ----
+    const hadMouseInput = this.mouseDx !== 0 || this.mouseDy !== 0;
     if (this.canControl && this.pointerLocked) {
       this.cameraYaw -= this.mouseDx * this.lookSensitivity;
       this.cameraPitch -= this.mouseDy * this.lookSensitivity;
@@ -962,6 +967,19 @@ export class Player {
       );
       wish.copy(forward).multiplyScalar(f).addScaledVector(right, s);
       if (wish.lengthSq() > 0) wish.normalize();
+    }
+
+    // ---- idle camera pan ----
+    const playerIdle = wish.lengthSq() < 0.0001 && !hadMouseInput && this.onGround;
+    if (playerIdle) {
+      this._idleTimer += dt;
+    } else {
+      this._idleTimer = 0;
+      this._idlePanning = false;
+    }
+    if (this._idleTimer > 5.0) this._idlePanning = true;
+    if (this._idlePanning) {
+      this.cameraYaw += 0.18 * dt;  // ~35s per full orbit
     }
 
     // ---- speeds ----
