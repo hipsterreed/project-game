@@ -727,13 +727,15 @@ function menuUpdate(dt, t) {
 
   renderer.toneMappingExposure = 1.5;
 
-  // gentle drift at the lighthouse — same base position as FLICKER phase
+  // wider, lower view of the floating island — zooms into the lighthouse
+  // when the cinematic begins (FLICKER phase lerps from here to _zP0).
   camera.position.set(
-    1.5 + Math.sin(t * 0.13) * 0.6,
-    54.5 + Math.sin(t * 0.09 + 1.3) * 0.25,
-    -222,
+    5 + Math.sin(t * 0.11) * 0.8,
+    30 + Math.sin(t * 0.08 + 1.1) * 0.4,
+    -175,
   );
-  camera.lookAt(0, 53.8, -240);
+  _camLook.set(0, 46, -238);
+  camera.lookAt(_camLook);
 }
 
 function introUpdate(dt, t) {
@@ -766,10 +768,10 @@ function introUpdate(dt, t) {
 
   // ---- Camera path ----
   if (stateTime < INTRO_ZOOM_AT) {
-    // FLICKER: hold tight on the lighthouse lamp — keep trackers in sync so
-    // the lerp-based phases below don't snap when they take over
-    camera.position.set(1.5, 54.5, -222);
-    _camLook.set(0, 53.8, -240);
+    // FLICKER: zoom in from the menu's wide shot to the lighthouse.
+    // Lerp drives the camera smoothly without a snap.
+    camera.position.lerp(_zP0, Math.min(1, dt * 2.4));
+    _camLook.lerp(_zL0, Math.min(1, dt * 2.2));
     camera.lookAt(_camLook);
 
   } else {

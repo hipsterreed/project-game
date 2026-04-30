@@ -1,0 +1,7 @@
+{
+  "name": "the-quiet-cliffs",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "npx serve . -l ${PORT:-3000}"
+  }
+}
