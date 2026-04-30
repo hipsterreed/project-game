@@ -154,15 +154,7 @@ export function buildWorld(scene, renderer) {
   skyMat.uniforms.uMid.value.set("#8a7a8c");
   skyMat.uniforms.uZenith.value.set("#3a4a6a");
   skyMat.uniforms.uSunColor.value.set("#f0b890");
-  // The Last Light: replaces planet 1 — a fractured glowing lantern, high
-  // and in the sunrise direction so the player's eye is drawn to it from
-  // the cliff edge. Size starts modest, grows during finale.
-  skyMat.uniforms.uPlanetDir.value.set(0.10, 0.55, -0.83).normalize();
-  skyMat.uniforms.uPlanetSize.value = 0.06;
-  skyMat.uniforms.uPlanetColor.value.set("#fff0b8");
-  skyMat.uniforms.uPlanetShade.value.set("#3a2a14");
-  skyMat.uniforms.uPlanetRing.value = 1.32;            // cracked broken-ring halo
-  skyMat.uniforms.uPlanetRingColor.value.set("#ffd28a");
+  skyMat.uniforms.uPlanetSize.value = 0.0;
   // hide the second planet (was a tiny moon — distracting at sunrise)
   skyMat.uniforms.uPlanet2Size.value = 0.0;
   const sky = new THREE.Mesh(skyGeo, skyMat);
@@ -328,10 +320,6 @@ export function buildWorld(scene, renderer) {
   const clouds = buildClouds();
   root.add(clouds.group);
 
-
-  // ---- distant silhouette range (kept; reads as far cliff face) ----
-  const range = buildDistantRange();
-  root.add(range);
 
   // colliders contributed by cliff props (bridge planks act like stairs)
   const stairColliders = cliffs.colliders || [];
@@ -903,70 +891,111 @@ function buildDistantMountains() {
     return m;
   }
 
-  // farthest range — tallest, palest, melts into the sky above everything
-  // peaks reach y≈350, about 18° above the player camera — true giants
+  // ghost layer — enormous, sky-toned, barely-there sentinels that melt into
+  // the dawn haze; the tallest peaks crest ~580 above base
   group.add(buildRidge({
-    radius: 1020,
-    segs: 800,
-    baseY: -180,
-    peakLow: 160,
-    peakHigh: 450,
-    baseColor: "#b29498",
-    peakColor: "#ffd9b0",
+    radius: 1150,
+    segs: 560,
+    baseY: -230,
+    peakLow: 200,
+    peakHigh: 580,
+    baseColor: "#afa0aa",   // pale mauve-grey, matches sky tone
+    peakColor: "#f6e4d2",   // warm cream, almost white
+    radialJitter: 0.03,
+    octaves: [
+      { freq: 1.1,  amp: 0.58 },
+      { freq: 3.1,  amp: 0.24 },
+      { freq: 7.3,  amp: 0.11 },
+      { freq: 17.0, amp: 0.055 },
+      { freq: 41.0, amp: 0.025 },
+    ],
+    seed: 2.718,
+  }));
+
+  // far range — tall, warm atmospheric haze, peaks y≈400
+  group.add(buildRidge({
+    radius: 860,
+    segs: 720,
+    baseY: -195,
+    peakLow: 110,
+    peakHigh: 400,
+    baseColor: "#9c7c8c",   // warm dusty mauve
+    peakColor: "#f0c498",   // peachy-golden
     radialJitter: 0.04,
     octaves: [
-      { freq: 1.2,  amp: 0.55 },
-      { freq: 3.7,  amp: 0.28 },
-      { freq: 9.3,  amp: 0.16 },
-      { freq: 23.1, amp: 0.09 },
-      { freq: 53.0, amp: 0.045 },
-      { freq: 113.0, amp: 0.022 },
-      { freq: 241.0, amp: 0.01 },
+      { freq: 1.3,  amp: 0.55 },
+      { freq: 4.1,  amp: 0.27 },
+      { freq: 10.3, amp: 0.15 },
+      { freq: 25.0, amp: 0.08 },
+      { freq: 59.0, amp: 0.04 },
+      { freq: 131.0, amp: 0.02 },
     ],
     seed: 0.913,
   }));
 
-  // far range — tall mid-distance range, rises to y≈220, warm haze
+  // mid range — the signature layer, deep purple body, warm crest
   group.add(buildRidge({
-    radius: 760,
-    segs: 660,
-    baseY: -160,
-    peakLow: 90,
-    peakHigh: 300,
-    baseColor: "#8a6878",
-    peakColor: "#e6b890",
-    radialJitter: 0.05,
+    radius: 640,
+    segs: 700,
+    baseY: -168,
+    peakLow: 75,
+    peakHigh: 270,
+    baseColor: "#6a4660",   // deep dusty purple
+    peakColor: "#de9870",   // warm terracotta
+    radialJitter: 0.06,
     octaves: [
-      { freq: 1.4,  amp: 0.55 },
+      { freq: 1.5,  amp: 0.55 },
       { freq: 4.7,  amp: 0.28 },
-      { freq: 11.3, amp: 0.16 },
-      { freq: 27.0, amp: 0.09 },
-      { freq: 63.0, amp: 0.045 },
-      { freq: 137.0, amp: 0.02 },
+      { freq: 11.9, amp: 0.16 },
+      { freq: 28.0, amp: 0.09 },
+      { freq: 65.0, amp: 0.046 },
+      { freq: 143.0, amp: 0.023 },
     ],
     seed: 1.234,
   }));
 
-  // near range — darkest, most detailed, peaks at y≈130 (~14° above camera)
+  // near-mid range — darker, more rugged silhouette
   group.add(buildRidge({
-    radius: 540,
-    segs: 580,
-    baseY: -140,
-    peakLow: 50,
-    peakHigh: 190,
-    baseColor: "#5a3e3c",
-    peakColor: "#d99868",
-    radialJitter: 0.08,
+    radius: 450,
+    segs: 620,
+    baseY: -148,
+    peakLow: 45,
+    peakHigh: 165,
+    baseColor: "#3a2030",   // dark warm purple-brown
+    peakColor: "#b47048",   // warm sienna
+    radialJitter: 0.09,
     octaves: [
-      { freq: 2.1,  amp: 0.50 },
-      { freq: 5.3,  amp: 0.28 },
-      { freq: 13.1, amp: 0.17 },
-      { freq: 31.0, amp: 0.09 },
-      { freq: 71.0, amp: 0.045 },
-      { freq: 153.0, amp: 0.022 },
-      { freq: 317.0, amp: 0.011 },
+      { freq: 2.1,  amp: 0.52 },
+      { freq: 5.7,  amp: 0.28 },
+      { freq: 14.3, amp: 0.17 },
+      { freq: 34.0, amp: 0.09 },
+      { freq: 79.0, amp: 0.048 },
+      { freq: 173.0, amp: 0.024 },
+      { freq: 367.0, amp: 0.012 },
     ],
     seed: 5.678,
+  }));
+
+  // near silhouette — almost black, finest crags, reads as close cliff face
+  group.add(buildRidge({
+    radius: 310,
+    segs: 560,
+    baseY: -128,
+    peakLow: 18,
+    peakHigh: 82,
+    baseColor: "#160c12",   // near-black with purple warmth
+    peakColor: "#3e2018",   // very dark warm brown
+    radialJitter: 0.12,
+    octaves: [
+      { freq: 2.7,  amp: 0.48 },
+      { freq: 6.9,  amp: 0.30 },
+      { freq: 17.3, amp: 0.19 },
+      { freq: 43.0, amp: 0.11 },
+      { freq: 101.0, amp: 0.058 },
+      { freq: 227.0, amp: 0.029 },
+      { freq: 487.0, amp: 0.015 },
+    ],
+    seed: 3.14159,
   }));
 
   return group;

@@ -640,10 +640,12 @@ function buildSkyIsland(pos, mats) {
   //   y=−21.0           └─────┘      stratum 3 bot  (R  4.0)
   //   y=−21.8               ═══       flat bottom cap (R  4.0)
 
+  // Each stratum's top extends past the layer above (cy shifted up, topR wider)
+  // so no gap is visible at the seams regardless of polygon count mismatch.
   const STRATA = [
-    { cy: -3.0,  h: 5.0,  topR: 17.5, botR: 13.5, segs: 20 },
-    { cy: -9.0,  h: 7.0,  topR: 13.0, botR:  8.0, segs: 18 },
-    { cy: -17.0, h: 8.0,  topR:  7.5, botR:  4.0, segs: 14 },
+    { cy: -2.5,  h: 5.0,  topR: 18.5, botR: 13.5, segs: 20 },  // top at y=0  (into disc)
+    { cy: -8.5,  h: 7.0,  topR: 14.0, botR:  8.0, segs: 18 },  // top at y=-5 (into s1 bot)
+    { cy: -16.0, h: 8.0,  topR:  8.5, botR:  4.0, segs: 14 },  // top at y=-12 (into s2 bot)
   ];
   for (const s of STRATA) {
     const stratum = new THREE.Mesh(
@@ -660,7 +662,7 @@ function buildSkyIsland(pos, mats) {
     new THREE.CylinderGeometry(4.2, 4.2, 0.8, 14),
     STONE_DARK,
   );
-  bottomCap.position.y = -21.8;
+  bottomCap.position.y = -20.8;
   bottomCap.castShadow = true;
   g.add(bottomCap);
 
