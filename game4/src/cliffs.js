@@ -169,12 +169,7 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
    *   with two sagging rope-curves on either side.
    * --------------------------------------------------------- */
   const bridges = [];
-  const BRIDGE_SPECS = [
-    // a bridge crossing a small dip on the way to the cliff edge
-    { from: { x:  4.0, z: -38 }, to: { x: -4.0, z: -52 }, planks: 12, missing: [3, 4, 8] },
-    // a side-bridge to a fragment of the island
-    { from: { x: -36,  z: -8  }, to: { x: -54,  z: -2  }, planks: 10, missing: [2, 6] },
-  ];
+  const BRIDGE_SPECS = [];
   for (const spec of BRIDGE_SPECS) {
     const b = buildBridge(spec, { getTerrainHeight, WOOD_MAT, WOOD_DARK, ROPE_MAT });
     group.add(b.group);
@@ -189,12 +184,7 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
    *   in the wind already kicked up by the global wind uniform.)
    * --------------------------------------------------------- */
   const banners = [];
-  const BANNER_SPOTS = [
-    { x:  10, z: -16, color: 0xffd9a0 },
-    { x: -18, z: -28, color: 0xb8cfd8 },
-    { x:  28, z: -54, color: 0xe28f9a },
-    { x: -44, z: -66, color: 0xf2e6c0 },
-  ];
+  const BANNER_SPOTS = [];
   for (const spot of BANNER_SPOTS) {
     const b = buildBanner(spot, { getTerrainHeight, WOOD_DARK });
     group.add(b.group);
@@ -261,13 +251,7 @@ export function buildCliffs({ getTerrainHeight, ISLAND_R, CLIFF_R }) {
    *   later in scene.js so the resonance system picks them up.
    * --------------------------------------------------------- */
   const windstones = [];
-  const STONE_SPOTS = [
-    { x:  6, z: -12 },
-    { x: -8, z: -28 },
-    { x:  10, z: -44 },
-    { x: -6, z: -62 },
-    { x:  3, z: -82 },
-  ];
+  const STONE_SPOTS = [];
   for (const spot of STONE_SPOTS) {
     const ws = buildWindStone(spot, { getTerrainHeight, STONE_DARK });
     group.add(ws.group);
@@ -473,19 +457,33 @@ export function updateCliffs(cliffs, dt, t, player, audio) {
     }
   }
 
-  // ---- sky island runes: gentle out-of-phase pulse on each material ----
+  // ---- sky island runes: pulse while lighthouse lamp burns, dark when out ----
   const si = cliffs.skyIsland;
   if (si) {
+    // lampMat.opacity is driven to 0 by the intro cinematic when the lamp goes out.
+    // Normalise by the lamp's design-time max (0.88) so glyphs track brightness exactly.
+    const lampBright = si.lampMat ? Math.min(1, si.lampMat.opacity / 0.88) : 0;
+
     for (let i = 0; i < si.runeMats.length; i++) {
       const m = si.runeMats[i];
       const base = m.userData.baseOpacity;
-      // each rune drifts on its own phase so the inscription "breathes"
-      const pulse = 0.78 + 0.22 * Math.sin(t * 0.55 + i * 0.7);
-      m.opacity = base * pulse;
+      // slow, out-of-phase pulse so the inscription "breathes" like old stone
+      const pulse = 0.80 + 0.20 * Math.sin(t * 0.45 + i * 0.65);
+      m.opacity = base * pulse * lampBright;
     }
     if (si.haloMat) {
       const base = si.haloMat.userData.baseOpacity;
       si.haloMat.opacity = base * (0.85 + 0.15 * Math.sin(t * 0.9));
+    }
+    // outer icosahedron rotates slowly, inner octahedron counter-rotates —
+    // together they catch different facets of light each frame like a gem
+    if (si.lampMesh) {
+      si.lampMesh.rotation.y = t * 0.38;
+      si.lampMesh.rotation.x = Math.sin(t * 0.22) * 0.18;
+    }
+    if (si.coreMesh) {
+      si.coreMesh.rotation.y = -t * 0.65;
+      si.coreMesh.rotation.z =  t * 0.28;
     }
   }
 }
@@ -633,34 +631,98 @@ function buildSkyIsland(pos, mats) {
   top.receiveShadow = true;
   g.add(top);
 
-  // rocky tapered underside — cone with apex pointing down
-  const under = new THREE.Mesh(
-    new THREE.ConeGeometry(ISLAND_R - 0.8, 22, 28, 4, true),
+  // ---- rocky underside: three stratified layers ----
+  // Each stratum is wider at its top than its bottom, so from below every
+  // layer overhangs the one beneath it — reads as a torn rock mass, not a cone.
+  //
+  //   y=−0.5  ┌─────────────────────────┐ stratum 1 top  (R 17.5)
+  //            │  (overhang lip)          │
+  //   y=−5.5  └───────────────────┘       stratum 1 bot  (R 13.5)
+  //   y=−5.5        ┌──────────────────┐  stratum 2 top  (R 13.0)
+  //                 │                  │
+  //   y=−12.5       └──────────┘        stratum 2 bot  (R  8.0)
+  //   y=−13.0           ┌───────────┐   stratum 3 top  (R  7.5)
+  //                     │           │
+  //   y=−21.0           └─────┘      stratum 3 bot  (R  4.0)
+  //   y=−21.8               ═══       flat bottom cap (R  4.0)
+
+  const STRATA = [
+    { cy: -3.0,  h: 5.0,  topR: 17.5, botR: 13.5, segs: 20 },
+    { cy: -9.0,  h: 7.0,  topR: 13.0, botR:  8.0, segs: 18 },
+    { cy: -17.0, h: 8.0,  topR:  7.5, botR:  4.0, segs: 14 },
+  ];
+  for (const s of STRATA) {
+    const stratum = new THREE.Mesh(
+      new THREE.CylinderGeometry(s.topR, s.botR, s.h, s.segs, 2),
+      STONE_DARK,
+    );
+    stratum.position.y = s.cy;
+    stratum.castShadow = true;
+    g.add(stratum);
+  }
+
+  // flat bottom cap — sheared-off underside feels like it was ripped from the ground
+  const bottomCap = new THREE.Mesh(
+    new THREE.CylinderGeometry(4.2, 4.2, 0.8, 14),
     STONE_DARK,
   );
-  under.rotation.x = Math.PI;       // flip so the point faces down
-  under.position.y = -TOP_THICK / 2 - 11;
-  under.castShadow = true;
-  g.add(under);
+  bottomCap.position.y = -21.8;
+  bottomCap.castShadow = true;
+  g.add(bottomCap);
+
+  // ---- hanging boulder clusters ----
+  // Irregular icosahedra scattered across the underside add roughness and
+  // break up the clean geometry of the strata edges.
+  const HANG_GEO = new THREE.IcosahedronGeometry(1.0, 0);
+  const HANG_SPOTS = [
+    // outer perimeter drips along stratum 1
+    { r: 15.0, a: 0.3,  y: -2.5,  sx: 2.4, sy: 1.2, sz: 2.0 },
+    { r: 13.5, a: 1.1,  y: -4.0,  sx: 1.8, sy: 2.0, sz: 1.6 },
+    { r: 14.5, a: 2.0,  y: -3.2,  sx: 2.2, sy: 1.4, sz: 2.4 },
+    { r: 12.8, a: 3.2,  y: -4.5,  sx: 1.6, sy: 1.8, sz: 1.5 },
+    { r: 15.5, a: 4.1,  y: -2.8,  sx: 2.6, sy: 1.0, sz: 2.2 },
+    { r: 13.0, a: 5.3,  y: -3.8,  sx: 1.9, sy: 1.6, sz: 2.0 },
+    // mid-depth chunks along stratum 2 seam
+    { r:  9.5, a: 0.7,  y: -8.0,  sx: 2.0, sy: 2.6, sz: 1.8 },
+    { r: 11.0, a: 1.8,  y: -7.2,  sx: 1.6, sy: 2.0, sz: 2.2 },
+    { r:  8.5, a: 2.9,  y: -9.0,  sx: 2.4, sy: 1.8, sz: 1.6 },
+    { r: 10.5, a: 4.5,  y: -7.8,  sx: 1.8, sy: 2.4, sz: 2.0 },
+    // lower clusters near stratum 3
+    { r:  5.5, a: 0.4,  y: -14.5, sx: 1.8, sy: 2.8, sz: 1.6 },
+    { r:  6.5, a: 2.4,  y: -13.8, sx: 2.0, sy: 2.2, sz: 1.8 },
+    { r:  5.0, a: 4.0,  y: -15.0, sx: 1.6, sy: 3.0, sz: 1.4 },
+    // a couple near the flat bottom for final roughness
+    { r:  3.0, a: 1.2,  y: -19.5, sx: 1.4, sy: 2.0, sz: 1.2 },
+    { r:  2.5, a: 3.8,  y: -20.0, sx: 1.2, sy: 1.6, sz: 1.4 },
+  ];
+  for (let i = 0; i < HANG_SPOTS.length; i++) {
+    const s = HANG_SPOTS[i];
+    const rock = new THREE.Mesh(HANG_GEO, i & 1 ? STONE_LIGHT : STONE_DARK);
+    rock.position.set(Math.cos(s.a) * s.r, s.y, Math.sin(s.a) * s.r);
+    rock.scale.set(s.sx, s.sy, s.sz);
+    rock.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+    rock.castShadow = true;
+    g.add(rock);
+  }
 
   // a ring of jagged boulders around the equator for silhouette
   const BOULDER_GEO = new THREE.IcosahedronGeometry(1.0, 0);
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
-    const r = ISLAND_R - 0.8 + (Math.random() - 0.3) * 1.2;
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
+    const r = ISLAND_R - 1.0 + (Math.random() - 0.3) * 1.4;
     const stone = new THREE.Mesh(
       BOULDER_GEO,
       i & 1 ? STONE_LIGHT : STONE_DARK,
     );
     stone.position.set(
       Math.cos(a) * r,
-      -1.2 - Math.random() * 1.0,
+      -1.5 - Math.random() * 1.2,
       Math.sin(a) * r,
     );
     stone.scale.set(
-      0.9 + Math.random() * 1.6,
-      1.2 + Math.random() * 1.6,
-      0.9 + Math.random() * 1.6,
+      1.2 + Math.random() * 2.0,
+      1.4 + Math.random() * 2.0,
+      1.2 + Math.random() * 2.0,
     );
     stone.rotation.set(
       Math.random() * Math.PI,
@@ -671,10 +733,18 @@ function buildSkyIsland(pos, mats) {
     g.add(stone);
   }
 
-  /* ---- ancient runes: rings + spokes + glyph dots, additive emissive,
-   * vibrant but capped to ~0.55 opacity so they catch the eye without
-   * blowing out the dim pre-dawn palette. */
-  const RUNE_COLORS = [0x4ad8ff, 0xff6acc, 0xffd24a, 0x9aff86];
+  /* ---- floor hieroglyphics: blue-glowing symbols inscribed on the surface.
+   *
+   * Layout (outward → inward):
+   *   R 16.2  outer perimeter band — 36 alternating block marks
+   *   R 13.8  thick ring separator
+   *   R 11.0  8 hieroglyphic symbols, each in a cartouche frame
+   *   R  9.2  ring separator
+   *   R  6.5  8 small chevron marks (inner guard ring)
+   *   R  5.1→9.5  double-line spokes with diamond accents (×8)
+   *   R  4.8  inner ring separator
+   *   R  0    central Eye of Ra
+   * --------------------------------------------------------- */
   const runeMats = [];
   function makeRuneMat(color, opacity) {
     const m = new THREE.MeshBasicMaterial({
@@ -692,119 +762,546 @@ function buildSkyIsland(pos, mats) {
 
   const RUNE_Y = TOP_THICK / 2 + 0.025;
 
-  // three concentric rings, each its own color
-  const RING_RADII = [13.5, 9.0, 5.0];
-  for (let i = 0; i < RING_RADII.length; i++) {
-    const ringR = RING_RADII[i];
-    const ringGeo = new THREE.RingGeometry(ringR - 0.20, ringR, 96);
-    ringGeo.rotateX(-Math.PI / 2);
-    const ring = new THREE.Mesh(
-      ringGeo,
-      makeRuneMat(RUNE_COLORS[i % RUNE_COLORS.length], 0.55),
-    );
-    ring.position.y = RUNE_Y + i * 0.005;
+  // pale, washed-out ancient-stone blue — ghostly rather than electric
+  const mBright = makeRuneMat(0xd0e8ff, 0.60);   // pale ice blue
+  const mMid    = makeRuneMat(0x9ab8dd, 0.46);   // dusty periwinkle
+  const mDeep   = makeRuneMat(0x6688aa, 0.34);   // worn stone blue
+  const mAccent = makeRuneMat(0xe8f4ff, 0.72);   // near-white highlight
+
+  // ── floor geometry helpers ─────────────────────────────────────────────────
+  function fPlane(w, d) {
+    const geo = new THREE.PlaneGeometry(w, d); geo.rotateX(-Math.PI / 2); return geo;
+  }
+  function fRing(inner, outer, segs = 64) {
+    const geo = new THREE.RingGeometry(inner, outer, segs); geo.rotateX(-Math.PI / 2); return geo;
+  }
+  function fCircle(r, segs = 16) {
+    const geo = new THREE.CircleGeometry(r, segs); geo.rotateX(-Math.PI / 2); return geo;
+  }
+  function fm(geo, mat) { return new THREE.Mesh(geo, mat); }
+
+  // ── three structural separator rings ─────────────────────────────────────
+  for (const [r, thick, mat] of [
+    [13.8, 0.26, mMid],
+    [ 9.2, 0.20, mMid],
+    [ 4.8, 0.20, mBright],
+  ]) {
+    const ring = fm(fRing(r - thick * 0.4, r + thick * 0.6), mat);
+    ring.position.y = RUNE_Y;
     g.add(ring);
   }
 
-  // 8 radial spokes between the inner and outer rings
-  const SPOKES = 8;
-  for (let i = 0; i < SPOKES; i++) {
-    const a = (i / SPOKES) * Math.PI * 2;
-    const inner = 5.2;
-    const outer = 8.8;
-    const len = outer - inner;
-    const spokeGeo = new THREE.PlaneGeometry(0.22, len);
-    spokeGeo.rotateX(-Math.PI / 2);
-    spokeGeo.translate(0, 0, inner + len / 2);
-    const spoke = new THREE.Mesh(
-      spokeGeo,
-      makeRuneMat(RUNE_COLORS[i % RUNE_COLORS.length], 0.45),
-    );
-    spoke.rotation.y = a;
-    spoke.position.y = RUNE_Y + 0.005;
-    g.add(spoke);
+  // ── outer perimeter: 36 alternating block marks at R ≈ 16.2 ──────────────
+  for (let i = 0; i < 36; i++) {
+    const a  = (i / 36) * Math.PI * 2;
+    const mat = i % 3 === 0 ? mBright : mDeep;
+    const bw  = i % 3 === 0 ? 0.52 : 0.30;
+    const blk = fm(fPlane(bw, 0.22), mat);
+    blk.position.set(Math.cos(a) * 16.2, RUNE_Y, Math.sin(a) * 16.2);
+    blk.rotation.y = a;
+    g.add(blk);
+    // small accent dot between every fourth block
+    if (i % 4 === 0) {
+      const dot = fm(fCircle(0.10), mAccent);
+      const da = a + Math.PI / 36;
+      dot.position.set(Math.cos(da) * 15.7, RUNE_Y + 0.004, Math.sin(da) * 15.7);
+      g.add(dot);
+    }
   }
 
-  // glyph dots scattered along a mid radius — irregular spacing reads
-  // as written symbols rather than a regular pattern
-  for (let i = 0; i < 20; i++) {
-    const a = (i / 20) * Math.PI * 2 + Math.sin(i * 1.31) * 0.12;
-    const r = 11.2 + Math.sin(i * 2.7) * 0.4;
-    const size = 0.18 + Math.random() * 0.18;
-    const dotGeo = new THREE.CircleGeometry(size, 8);
-    dotGeo.rotateX(-Math.PI / 2);
-    const dot = new THREE.Mesh(
-      dotGeo,
-      makeRuneMat(RUNE_COLORS[i % RUNE_COLORS.length], 0.5),
-    );
-    dot.position.set(Math.cos(a) * r, RUNE_Y + 0.01, Math.sin(a) * r);
-    g.add(dot);
+  // ── 8 hieroglyphic symbols in cartouches at R = 11 ───────────────────────
+  // Each glyph is built from flat-floor planes/rings; symbols are composited
+  // from basic strokes so they read as recognisable Egyptian forms from above.
+  //
+  // Glyph coordinate system: +Z = "up" of the symbol (spine direction),
+  // +X = rightward.  Groups are rotated so Z points radially outward,
+  // so the top of each symbol faces away from the lighthouse.
+  const GLYPH_DEFS = [
+    // 0 – Ankh (𓋹): narrow shaft, thin crossbar, tall oval loop
+    (grp, s, ma, mb) => {
+      // shaft below crossbar
+      grp.add(fm(fPlane(s*.08, s*.38), ma)).position.set(0,0,-s*.10);
+      // crossbar (thin, precise)
+      grp.add(fm(fPlane(s*.44, s*.07), ma)).position.set(0,0, s*.10);
+      // loop — taller than wide, like real ankh proportions
+      const loopGrp = new THREE.Group(); loopGrp.position.set(0,0, s*.36);
+      loopGrp.add(fm(fRing(s*.11, s*.18, 28), mb));
+      // vertical bridge connecting loop to crossbar
+      loopGrp.add(fm(fPlane(s*.07, s*.18), ma)).position.set(0,0,-s*.14);
+      grp.add(loopGrp);
+    },
+    // 1 – Eye of Horus (𓂀): almond eye, iris, pupil, three cheek marks, kohl tail
+    (grp, s, ma, mb) => {
+      // upper and lower eyelid strokes meeting at corners
+      for (const side of [-1, 1]) {
+        for (let k = 0; k < 3; k++) {
+          const t = k / 2;
+          const ex = THREE.MathUtils.lerp(-s*.30, s*.30, t);
+          const ez = Math.sin(t * Math.PI) * s*.14 * side;
+          const seg = fm(fPlane(s*.24, s*.065), ma); seg.position.set(ex,0,ez); grp.add(seg);
+        }
+      }
+      // iris ring + filled pupil
+      grp.add(fm(fRing(s*.08, s*.13, 20), ma));
+      grp.add(fm(fCircle(s*.07), mb));
+      // three vertical cheek marks (the falcon stripe below)
+      for (let k = 0; k < 3; k++) {
+        const ck = fm(fPlane(s*.055, s*.18), ma);
+        ck.position.set(-s*.12 + k*s*.12, 0, -s*.24 - k*s*.04);
+        ck.rotation.y = (k-1) * 0.18;
+        grp.add(ck);
+      }
+      // kohl extension to the right
+      const kl = fm(fPlane(s*.20, s*.055), ma); kl.position.set(s*.40,0, s*.07); kl.rotation.y=-0.48; grp.add(kl);
+    },
+    // 2 – Ra sun disc (𓇳): filled disc, ring, alternating long/short rays
+    (grp, s, ma, mb) => {
+      grp.add(fm(fCircle(s*.17), mb));
+      grp.add(fm(fRing(s*.20, s*.25, 32), ma));
+      for (let ri = 0; ri < 8; ri++) {
+        const long = ri % 2 === 0;
+        const a2 = (ri / 8) * Math.PI * 2;
+        const dist = long ? s*.42 : s*.34;
+        const ray = fm(fPlane(s*.055, long ? s*.16 : s*.09), ma);
+        ray.position.set(Math.sin(a2)*dist, 0, Math.cos(a2)*dist);
+        ray.rotation.y = a2;
+        grp.add(ray);
+      }
+    },
+    // 3 – Was-sceptre (𓌀): forked base, thin shaft, animal-head top
+    (grp, s, ma, mb) => {
+      // thin shaft
+      grp.add(fm(fPlane(s*.07, s*.72), ma));
+      // animal head (Set-beast): rectangular block + two upright ears
+      grp.add(fm(fPlane(s*.22, s*.13), mb)).position.set(-s*.04,0, s*.40);
+      grp.add(fm(fPlane(s*.06, s*.14), ma)).position.set(-s*.14,0, s*.50);
+      grp.add(fm(fPlane(s*.06, s*.10), ma)).position.set( s*.06,0, s*.48);
+      // forked base — two angled prongs
+      const fl = fm(fPlane(s*.17, s*.06), ma); fl.position.set(-s*.11,0,-s*.36); fl.rotation.y= 0.55; grp.add(fl);
+      const fr = fm(fPlane(s*.17, s*.06), ma); fr.position.set( s*.11,0,-s*.36); fr.rotation.y=-0.55; grp.add(fr);
+    },
+    // 4 – Sacred ibis in profile (𓅬): horizontal body, long curved beak, legs
+    (grp, s, ma, mb) => {
+      // body (horizontal oval)
+      grp.add(fm(fPlane(s*.48, s*.20), ma)).position.set(s*.04, 0, s*.04);
+      // head
+      grp.add(fm(fCircle(s*.09), mb)).position.set(-s*.18, 0, s*.20);
+      // long curved beak (three angled segments tapering)
+      const b1 = fm(fPlane(s*.22, s*.055), ma); b1.position.set(-s*.28,0, s*.12); b1.rotation.y= 0.65; grp.add(b1);
+      const b2 = fm(fPlane(s*.16, s*.045), ma); b2.position.set(-s*.40,0,-s*.02); b2.rotation.y= 1.0;  grp.add(b2);
+      // two thin legs
+      grp.add(fm(fPlane(s*.055, s*.26), ma)).position.set(-s*.02, 0,-s*.22);
+      grp.add(fm(fPlane(s*.055, s*.26), ma)).position.set( s*.14, 0,-s*.22);
+      // feet (small horizontals)
+      grp.add(fm(fPlane(s*.16, s*.05), ma)).position.set(-s*.02, 0,-s*.36);
+      grp.add(fm(fPlane(s*.16, s*.05), ma)).position.set( s*.14, 0,-s*.36);
+    },
+    // 5 – Scarab (𓆣): oval body, spine, spread wings, six legs, antennae
+    (grp, s, ma, mb) => {
+      grp.add(fm(fRing(s*.09, s*.20, 20), mb)).position.set(0,0, s*.06);
+      grp.add(fm(fPlane(s*.08, s*.36), ma));                              // spine
+      // wings spread to each side
+      const wl = fm(fPlane(s*.28, s*.08), ma); wl.position.set(-s*.22,0, s*.08); wl.rotation.y= 0.5; grp.add(wl);
+      const wr = fm(fPlane(s*.28, s*.08), ma); wr.position.set( s*.22,0, s*.08); wr.rotation.y=-0.5; grp.add(wr);
+      // six legs (three per side)
+      for (const [lx, lz, ry] of [
+        [-s*.22, s*.08, 0.75], [ s*.22, s*.08,-0.75],
+        [-s*.22,-s*.01,-0.65], [ s*.22,-s*.01, 0.65],
+        [-s*.20,-s*.10, 0.45], [ s*.20,-s*.10,-0.45],
+      ]) { const lg = fm(fPlane(s*.18, s*.048), ma); lg.position.set(lx,0,lz); lg.rotation.y=ry; grp.add(lg); }
+      // antennae
+      const al = fm(fPlane(s*.055, s*.18), ma); al.position.set(-s*.10,0, s*.28); al.rotation.y= 0.4; grp.add(al);
+      const ar = fm(fPlane(s*.055, s*.18), ma); ar.position.set( s*.10,0, s*.28); ar.rotation.y=-0.4; grp.add(ar);
+    },
+    // 6 – Ma'at feather (𓂋): spine, tapering barbs, quill, base notch
+    (grp, s, ma, mb) => {
+      grp.add(fm(fPlane(s*.065, s*.78), ma));                             // spine
+      // barbs — longer near the middle, shorter at tip and quill
+      const barbs = [
+        [s*.38,  s*.27], [s*.44, s*.18], [s*.42, s*.09],
+        [s*.38,  0    ], [s*.42,-s*.09], [s*.40,-s*.18],
+        [s*.30, -s*.27],
+      ];
+      for (const [bw, bz] of barbs) {
+        const b = fm(fPlane(bw, s*.052), ma); b.position.set(0,0,bz); grp.add(b);
+      }
+      grp.add(fm(fCircle(s*.07), mb)).position.set(0,0,-s*.37);          // quill nub
+      grp.add(fm(fPlane(s*.14, s*.055), ma)).position.set(0,0,-s*.30);   // base notch
+    },
+    // 7 – Djed pillar (𓌀): four bands, collar, stepped base
+    (grp, s, ma, mb) => {
+      // four horizontal bands tapering as they rise
+      for (const [bz, bw] of [[s*.22,s*.46],[s*.13,s*.38],[s*.04,s*.30],[-s*.05,s*.24]]) {
+        grp.add(fm(fPlane(bw, s*.075), ma)).position.set(0,0,bz);
+      }
+      // collar band just below the top group
+      grp.add(fm(fPlane(s*.50, s*.055), mb)).position.set(0,0, s*.30);
+      // narrow neck + stepped base
+      grp.add(fm(fPlane(s*.20, s*.08), ma)).position.set(0,0,-s*.12);
+      grp.add(fm(fPlane(s*.30, s*.065), mb)).position.set(0,0,-s*.20);
+      grp.add(fm(fPlane(s*.40, s*.06),  ma)).position.set(0,0,-s*.27);
+    },
+  ];
+
+  for (let i = 0; i < 8; i++) {
+    const a   = (i / 8) * Math.PI * 2;
+    const gx  = Math.cos(a) * 11.0;
+    const gz  = Math.sin(a) * 11.0;
+    const ma  = i % 2 === 0 ? mBright : mMid;
+
+    const grp = new THREE.Group();
+    grp.position.set(gx, RUNE_Y + 0.01, gz);
+    grp.rotation.y = a;   // symbol Z+ points radially outward
+
+    // cartouche border: four sides + corner dots
+    const CW = 1.08, CH = 1.38, SW = 0.065;
+    for (const [bx, bz, bw, bd] of [
+      [0,  CH/2, CW + SW*2, SW], [0, -CH/2, CW + SW*2, SW],
+      [-CW/2, 0, SW, CH],        [ CW/2, 0, SW, CH],
+    ]) {
+      const side = fm(fPlane(bw, bd), mDeep);
+      side.position.set(bx, 0, bz);
+      grp.add(side);
+    }
+    for (const [cx, cz] of [[-CW/2,-CH/2],[-CW/2,CH/2],[CW/2,-CH/2],[CW/2,CH/2]]) {
+      const cdot = fm(fCircle(SW * 0.85, 8), mDeep);
+      cdot.position.set(cx, 0, cz);
+      grp.add(cdot);
+    }
+
+    GLYPH_DEFS[i](grp, 0.55, ma, mAccent);
+    g.add(grp);
   }
 
-  // central emblem — a small bright disc at the foot of the lighthouse
-  const emblemGeo = new THREE.CircleGeometry(1.4, 24);
-  emblemGeo.rotateX(-Math.PI / 2);
-  const emblem = new THREE.Mesh(emblemGeo, makeRuneMat(0xfff0c4, 0.5));
-  emblem.position.y = RUNE_Y + 0.015;
-  g.add(emblem);
+  // ── inner chevron markers at R = 6.5 (×8) ────────────────────────────────
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+    const grp = new THREE.Group();
+    grp.position.set(Math.cos(a) * 6.5, RUNE_Y + 0.008, Math.sin(a) * 6.5);
+    grp.rotation.y = a;
+    const lv = fm(fPlane(0.28, 0.07), mBright); lv.position.set(-0.12, 0, 0.12); lv.rotation.y=-0.65; grp.add(lv);
+    const rv = fm(fPlane(0.28, 0.07), mBright); rv.position.set( 0.12, 0, 0.12); rv.rotation.y= 0.65; grp.add(rv);
+    const sv = fm(fPlane(0.08, 0.30), mMid);   sv.position.set(0, 0, -0.06); grp.add(sv);
+    g.add(grp);
+  }
+
+  // ── double-line spokes with diamond accents (×8) ─────────────────────────
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const inner = 5.1, outer = 9.5, len = outer - inner;
+    const midR  = (inner + outer) / 2;
+    const perp  = a + Math.PI / 2;
+
+    for (const offset of [-0.09, 0.09]) {
+      const lx = Math.cos(a) * midR + Math.cos(perp) * offset;
+      const lz = Math.sin(a) * midR + Math.sin(perp) * offset;
+      const ln = fm(fPlane(0.055, len), mDeep);
+      ln.position.set(lx, RUNE_Y + 0.003, lz);
+      ln.rotation.y = a;
+      g.add(ln);
+    }
+    // rotated square (diamond) accent at mid-spoke
+    const dm = fm(fPlane(0.20, 0.20), mAccent);
+    dm.position.set(Math.cos(a) * midR, RUNE_Y + 0.005, Math.sin(a) * midR);
+    dm.rotation.y = a + Math.PI / 4;
+    g.add(dm);
+  }
+
+  // ── central Eye of Ra ─────────────────────────────────────────────────────
+  {
+    const ey = new THREE.Group();
+    ey.position.y = RUNE_Y + 0.02;
+    g.add(ey);
+
+    // iris + pupil
+    ey.add(Object.assign(fm(fRing(0.34, 0.52, 40), makeRuneMat(0x66aaff, 0.72)), {}));
+    ey.add(Object.assign(fm(fCircle(0.22), makeRuneMat(0xaaddff, 0.90)), {}));
+
+    // almond outline: 5 overlapping plane segments per arc side
+    for (const side of [-1, 1]) {
+      for (let k = 0; k < 5; k++) {
+        const t  = k / 4;
+        const ex = THREE.MathUtils.lerp(-1.05, 1.05, t);
+        const ez = Math.sin(t * Math.PI) * 0.42 * side;
+        const seg = fm(fPlane(0.48, 0.09), mBright);
+        seg.position.set(ex, 0, ez);
+        ey.add(seg);
+      }
+    }
+
+    // kohl tails extending from each corner
+    const kt1 = fm(fPlane(0.52, 0.08), mMid); kt1.position.set( 1.22, 0,-0.12); kt1.rotation.y= 0.32; ey.add(kt1);
+    const kt2 = fm(fPlane(0.52, 0.08), mMid); kt2.position.set(-1.22, 0,-0.12); kt2.rotation.y=-0.32; ey.add(kt2);
+  }
+
+  // soft glow disc at lighthouse base
+  {
+    const emblemGeo = new THREE.CircleGeometry(1.4, 24);
+    emblemGeo.rotateX(-Math.PI / 2);
+    const emblem = new THREE.Mesh(emblemGeo, makeRuneMat(0x99ccff, 0.38));
+    emblem.position.y = RUNE_Y + 0.015;
+    g.add(emblem);
+  }
 
   /* ---- lighthouse tower at the centre ---- */
   const tower = new THREE.Group();
   tower.position.y = TOP_THICK / 2;
   g.add(tower);
 
-  // base plinth
-  const plinth = new THREE.Mesh(
-    new THREE.CylinderGeometry(2.4, 3.0, 1.0, 16),
-    STONE_LIGHT,
-  );
-  plinth.position.y = 0.5;
-  plinth.castShadow = true;
-  plinth.receiveShadow = true;
-  tower.add(plinth);
+  // procedural stone block texture — mortared courses baked into a canvas
+  const _stoneTex = (() => {
+    const W = 512, H = 1024;
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#9e8e74';
+    ctx.fillRect(0, 0, W, H);
+    const id = ctx.getImageData(0, 0, W, H);
+    const d = id.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const n = (Math.random() - 0.5) * 30;
+      d[i]   = Math.min(255, Math.max(0, d[i]   + n));
+      d[i+1] = Math.min(255, Math.max(0, d[i+1] + n * 0.85));
+      d[i+2] = Math.min(255, Math.max(0, d[i+2] + n * 0.65));
+    }
+    ctx.putImageData(id, 0, 0);
+    ctx.strokeStyle = 'rgba(62,48,32,0.62)';
+    ctx.lineWidth = 2.5;
+    const CH = 36;
+    for (let y = 0; y <= H; y += CH) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+    ctx.lineWidth = 1.8;
+    const BW = 70;
+    for (let yi = 0; yi * CH <= H + CH; yi++) {
+      const off = (yi % 2 === 0) ? 0 : BW * 0.5;
+      const y0 = yi * CH, y1 = y0 + CH;
+      for (let x = off; x <= W + BW; x += BW) {
+        ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+      }
+    }
+    const tex = new THREE.CanvasTexture(cv);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(3, 2.5);
+    return tex;
+  })();
 
-  // tapered shaft
-  const shaft = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.4, 2.2, 8.5, 18),
-    STONE_LIGHT,
+  const towerStoneMat = new THREE.MeshStandardMaterial({
+    color: 0xc8b89e,
+    map: _stoneTex,
+    roughness: 0.90,
+  });
+  const towerDarkMat  = new THREE.MeshStandardMaterial({ color: 0x5c4a38, roughness: 0.92 });
+  const ironMat       = new THREE.MeshStandardMaterial({ color: 0x26201c, roughness: 0.52, metalness: 0.72 });
+
+  // ---- two-tier stepped plinth ----
+  const plinthBase = new THREE.Mesh(
+    new THREE.CylinderGeometry(3.0, 3.4, 0.55, 32),
+    towerDarkMat,
   );
-  shaft.position.y = 5.25;
+  plinthBase.position.y = 0.275;
+  plinthBase.castShadow = true;
+  plinthBase.receiveShadow = true;
+  tower.add(plinthBase);
+
+  const plinthTop = new THREE.Mesh(
+    new THREE.CylinderGeometry(2.5, 3.0, 0.5, 32),
+    towerStoneMat,
+  );
+  plinthTop.position.y = 0.8;
+  plinthTop.castShadow = true;
+  tower.add(plinthTop);
+
+  // ---- shaft (tapers from base to gallery) ----
+  const SHAFT_BOT_R = 2.38, SHAFT_TOP_R = 1.42;
+  const SHAFT_BOT_Y = 1.05, SHAFT_TOP_Y = 9.45;
+  const shaftH = SHAFT_TOP_Y - SHAFT_BOT_Y;
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(SHAFT_TOP_R, SHAFT_BOT_R, shaftH, 32, 6),
+    towerStoneMat,
+  );
+  shaft.position.y = (SHAFT_BOT_Y + SHAFT_TOP_Y) / 2;
   shaft.castShadow = true;
   tower.add(shaft);
 
-  // gallery ring (a wider band where the lantern room sits)
-  const gallery = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.85, 1.85, 0.5, 18),
-    STONE_DARK,
-  );
-  gallery.position.y = 9.75;
-  gallery.castShadow = true;
-  tower.add(gallery);
+  // five decorative stone bands proud of the shaft surface
+  for (const bandY of [2.4, 3.9, 5.4, 6.9, 8.4]) {
+    const tRel = (bandY - SHAFT_BOT_Y) / shaftH;
+    const r = THREE.MathUtils.lerp(SHAFT_BOT_R, SHAFT_TOP_R, tRel) + 0.17;
+    const band = new THREE.Mesh(
+      new THREE.CylinderGeometry(r, r, 0.30, 28),
+      towerDarkMat,
+    );
+    band.position.y = bandY;
+    tower.add(band);
+  }
 
-  // lantern room frame — open cylinder, shows the lamp inside
-  const lanternRoom = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.3, 1.3, 1.6, 8, 1, true),
-    new THREE.MeshStandardMaterial({
-      color: 0x4a3826,
-      roughness: 0.85,
-      side: THREE.DoubleSide,
-    }),
-  );
-  lanternRoom.position.y = 10.8;
-  tower.add(lanternRoom);
+  // ---- narrow window slots: 4 directions × 2 heights ----
+  const windowMat = new THREE.MeshStandardMaterial({ color: 0x08070a, roughness: 1 });
+  const archMat   = new THREE.MeshStandardMaterial({ color: 0x4a3c2c, roughness: 0.92 });
+  for (const winY of [3.7, 7.0]) {
+    const tRel = (winY - SHAFT_BOT_Y) / shaftH;
+    const surfR = THREE.MathUtils.lerp(SHAFT_BOT_R, SHAFT_TOP_R, tRel);
+    const WW = 0.26, WH = 0.88;
+    for (const a of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+      const ry = Math.PI / 2 - a;
+      const rx = Math.cos(a) * (surfR + 0.07);
+      const rz = Math.sin(a) * (surfR + 0.07);
+      const face = new THREE.Mesh(new THREE.PlaneGeometry(WW, WH), windowMat);
+      face.position.set(Math.cos(a) * (surfR + 0.015), winY, Math.sin(a) * (surfR + 0.015));
+      face.rotation.y = ry;
+      tower.add(face);
+      const sill = new THREE.Mesh(new THREE.BoxGeometry(WW + 0.18, 0.09, 0.13), archMat);
+      sill.position.set(rx, winY - WH / 2, rz);
+      sill.rotation.y = ry;
+      tower.add(sill);
+      const lintel = new THREE.Mesh(new THREE.BoxGeometry(WW + 0.18, 0.12, 0.11), archMat);
+      lintel.position.set(rx, winY + WH / 2, rz);
+      lintel.rotation.y = ry;
+      tower.add(lintel);
+      for (const side of [-1, 1]) {
+        const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.10, WH + 0.06, 0.11), archMat);
+        jamb.position.set(
+          rx + (-Math.sin(a)) * side * (WW / 2 + 0.05),
+          winY,
+          rz + Math.cos(a) * side * (WW / 2 + 0.05),
+        );
+        jamb.rotation.y = ry;
+        tower.add(jamb);
+      }
+    }
+  }
 
-  // glowing lamp
+  // ---- corbels beneath gallery floor ----
+  const corbelMat = new THREE.MeshStandardMaterial({ color: 0x7a6a54, roughness: 0.88 });
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2;
+    const corbel = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.44, 0.30), corbelMat);
+    corbel.position.set(Math.cos(a) * 2.04, 9.36, Math.sin(a) * 2.04);
+    corbel.rotation.y = Math.PI / 2 - a;
+    tower.add(corbel);
+  }
+
+  // ---- gallery platform ----
+  const galleryFloor = new THREE.Mesh(
+    new THREE.CylinderGeometry(2.15, 1.98, 0.35, 32),
+    towerDarkMat,
+  );
+  galleryFloor.position.y = 9.625;
+  galleryFloor.castShadow = true;
+  tower.add(galleryFloor);
+
+  // 24 thin iron posts + 3 horizontal rail rings
+  const RAIL_R = 1.96;
+  for (let i = 0; i < 24; i++) {
+    const a = (i / 24) * Math.PI * 2;
+    const post = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.036, 0.036, 0.70, 6),
+      ironMat,
+    );
+    post.position.set(Math.cos(a) * RAIL_R, 10.13, Math.sin(a) * RAIL_R);
+    tower.add(post);
+  }
+  for (const railY of [9.84, 10.15, 10.46]) {
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(RAIL_R, railY < 10.4 ? 0.044 : 0.054, 8, 32),
+      ironMat,
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = railY;
+    tower.add(ring);
+  }
+
+  // ---- transition collar: gallery → lantern room ----
+  const LAMP_Y      = 11.25;
+  const PANE_H      = 1.70;
+  const LAMP_R      = 1.35;
+  const LANTERN_BOT = LAMP_Y - PANE_H / 2;
+
+  const collar = new THREE.Mesh(
+    new THREE.CylinderGeometry(LAMP_R + 0.08, 2.02, LANTERN_BOT - 9.8, 24),
+    towerDarkMat,
+  );
+  collar.position.y = (9.8 + LANTERN_BOT) / 2;
+  tower.add(collar);
+
+  // ---- 12-sided glass lantern room ----
+  const PANE_COUNT = 12;
+  const PANE_INSET = LAMP_R * Math.cos(Math.PI / PANE_COUNT);
+  const PANE_W     = 2 * LAMP_R * Math.sin(Math.PI / PANE_COUNT) - 0.07;
+
+  const glassMat = new THREE.MeshStandardMaterial({
+    color: 0xfff6d0,
+    emissive: 0xffcc44,
+    emissiveIntensity: 0.22,
+    transparent: true,
+    opacity: 0.40,
+    roughness: 0.02,
+    metalness: 0.12,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+
+  // 4 iron frame rings (bottom, lower-mid, upper-mid, top)
+  for (const fy of [
+    LAMP_Y - PANE_H / 2,
+    LAMP_Y - PANE_H / 6,
+    LAMP_Y + PANE_H / 6,
+    LAMP_Y + PANE_H / 2,
+  ]) {
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(LAMP_R + 0.02, 0.052, 8, 22),
+      ironMat,
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = fy;
+    tower.add(ring);
+  }
+
+  for (let i = 0; i < PANE_COUNT; i++) {
+    const a    = (i / PANE_COUNT) * Math.PI * 2;
+    const aMid = a + Math.PI / PANE_COUNT;
+
+    const post = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.050, 0.050, PANE_H + 0.08, 6),
+      ironMat,
+    );
+    post.position.set(Math.cos(a) * LAMP_R, LAMP_Y, Math.sin(a) * LAMP_R);
+    tower.add(post);
+
+    const pane = new THREE.Mesh(new THREE.PlaneGeometry(PANE_W, PANE_H), glassMat);
+    pane.position.set(Math.cos(aMid) * PANE_INSET, LAMP_Y, Math.sin(aMid) * PANE_INSET);
+    pane.rotation.y = -(aMid + Math.PI / 2);
+    tower.add(pane);
+
+    // horizontal mid-bar mullion
+    const midBar = new THREE.Mesh(
+      new THREE.BoxGeometry(PANE_W - 0.01, 0.040, 0.030),
+      ironMat,
+    );
+    midBar.position.set(Math.cos(aMid) * PANE_INSET, LAMP_Y, Math.sin(aMid) * PANE_INSET);
+    midBar.rotation.y = -(aMid + Math.PI / 2);
+    tower.add(midBar);
+  }
+
+  // ---- geometric light crystal ----
   const lampMat = new THREE.MeshBasicMaterial({
     color: 0xffe9b8,
     transparent: true,
-    opacity: 0.95,
+    opacity: 0.88,
     fog: false,
   });
-  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.85, 16, 12), lampMat);
-  lamp.position.y = 10.8;
+  const lamp = new THREE.Mesh(new THREE.IcosahedronGeometry(0.72, 2), lampMat);
+  lamp.position.y = LAMP_Y;
+  lamp.rotation.y = Math.PI / 5;
   tower.add(lamp);
 
-  // soft halo around the lamp (additive)
+  const coreMat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false });
+  const coreMesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.32, 1), coreMat);
+  coreMesh.position.y = LAMP_Y;
+  tower.add(coreMesh);
+
   const haloMat = new THREE.MeshBasicMaterial({
     color: 0xfff0c4,
     transparent: true,
@@ -814,33 +1311,75 @@ function buildSkyIsland(pos, mats) {
     fog: false,
   });
   haloMat.userData.baseOpacity = 0.22;
-  const halo = new THREE.Mesh(new THREE.SphereGeometry(1.55, 16, 12), haloMat);
-  halo.position.y = 10.8;
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(1.62, 24, 18), haloMat);
+  halo.position.y = LAMP_Y;
   tower.add(halo);
 
-  // conical roof
-  const roof = new THREE.Mesh(
-    new THREE.ConeGeometry(1.55, 1.7, 10),
-    STONE_DARK,
-  );
-  roof.position.y = 12.45;
-  roof.castShadow = true;
-  tower.add(roof);
+  // ---- roof: iron skirt band + 24-sided cone + 12 iron ribs + spike finial ----
+  const ROOF_BASE_Y = LAMP_Y + PANE_H / 2;
 
-  // small finial on top
-  const finial = new THREE.Mesh(
-    new THREE.SphereGeometry(0.16, 8, 6),
-    new THREE.MeshStandardMaterial({
-      color: 0xffd28a,
-      emissive: 0xffd28a,
-      emissiveIntensity: 0.45,
-      roughness: 0.6,
-    }),
+  const roofBand = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.50, 1.50, 0.24, 24),
+    ironMat,
   );
-  finial.position.y = 13.45;
+  roofBand.position.y = ROOF_BASE_Y + 0.12;
+  tower.add(roofBand);
+
+  const ROOF_H = 2.8;
+  const CONE_R = 1.56;
+  const roofCone = new THREE.Mesh(
+    new THREE.ConeGeometry(CONE_R, ROOF_H, 24),
+    towerDarkMat,
+  );
+  roofCone.position.y = ROOF_BASE_Y + 0.24 + ROOF_H / 2;
+  roofCone.castShadow = true;
+  tower.add(roofCone);
+
+  // 12 iron ribs aligned with the cone slope using quaternion
+  {
+    const CONE_BASE_Y = ROOF_BASE_Y + 0.24;
+    const CONE_TIP_Y  = CONE_BASE_Y + ROOF_H;
+    const slopeLen = Math.hypot(ROOF_H, CONE_R);
+    const _yAxis = new THREE.Vector3(0, 1, 0);
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const rib = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.020, 0.032, slopeLen, 4),
+        ironMat,
+      );
+      rib.position.set(
+        Math.cos(a) * CONE_R * 0.50,
+        (CONE_BASE_Y + CONE_TIP_Y) / 2,
+        Math.sin(a) * CONE_R * 0.50,
+      );
+      const slopeDir = new THREE.Vector3(
+        -Math.cos(a) * CONE_R, ROOF_H, -Math.sin(a) * CONE_R,
+      ).normalize();
+      rib.quaternion.setFromUnitVectors(_yAxis, slopeDir);
+      tower.add(rib);
+    }
+  }
+
+  const SPIKE_H = 0.72;
+  const spike = new THREE.Mesh(
+    new THREE.ConeGeometry(0.052, SPIKE_H, 6),
+    ironMat,
+  );
+  spike.position.y = ROOF_BASE_Y + 0.24 + ROOF_H + SPIKE_H / 2;
+  tower.add(spike);
+
+  const finialMat = new THREE.MeshStandardMaterial({
+    color: 0xffd28a,
+    emissive: 0xffd28a,
+    emissiveIntensity: 0.7,
+    roughness: 0.28,
+    metalness: 0.25,
+  });
+  const finial = new THREE.Mesh(new THREE.SphereGeometry(0.145, 16, 12), finialMat);
+  finial.position.y = ROOF_BASE_Y + 0.24 + ROOF_H + SPIKE_H;
   tower.add(finial);
 
-  return { group: g, runeMats, haloMat };
+  return { group: g, runeMats, haloMat, lampMat, lampMesh: lamp, coreMesh };
 }
 
 /* -----------------------------------------------------------

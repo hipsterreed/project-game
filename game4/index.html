@@ -136,18 +136,25 @@
       }
 
       #hud .prompt {
-        position: absolute;
-        left: 50%; top: 72%;
-        transform: translateX(-50%);
-        font-size: 12px;
+        position: fixed;
+        left: 50%; top: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 15px;
         letter-spacing: 0.45em;
         text-transform: uppercase;
-        color: rgba(237, 225, 200, 0.65);
+        color: rgba(237, 225, 200, 0.9);
         text-shadow: 0 2px 14px rgba(0,0,0,0.7);
         opacity: 0;
         transition: opacity 1.4s ease;
         text-align: center;
         white-space: nowrap;
+        padding: 10px 28px;
+        border: 1px solid rgba(237, 225, 200, 0.25);
+        background: rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        border-radius: 4px;
+        pointer-events: none;
       }
       #hud .prompt.show { opacity: 1; }
 

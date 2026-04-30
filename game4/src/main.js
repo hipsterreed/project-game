@@ -131,20 +131,20 @@ composer.addPass(new OutputPass());
 /* -----------------------------------------------------------
  * State machine
  * --------------------------------------------------------- */
-let mode = "exploring";        // exploring → restoring → ascending → finale → done
+let mode = "intro";            // intro → exploring → restoring → ascending → finale → done
 let stateTime = 0;             // seconds since this state began
 let firstInputAt = 0;          // when the player first touched a key/mouse
 
 // finale fade overlay (created lazily)
 let fadeOverlay = null;
 
-// ---- begin: skip the legacy menu/Begin flow, walking is enabled instantly ----
+// ---- begin: skip the legacy menu/Begin flow ----
 titleEl?.classList.add("hidden");
 beginBtn?.classList.add("hidden");
 hud?.classList.add("visible");
 
-// player has full control from the moment the game loads
-player.canControl = true;
+// player is locked during the opening cinematic
+player.canControl = false;
 
 function arm() {
   audio.start();
@@ -153,14 +153,19 @@ function arm() {
 
 window.addEventListener("pointerdown", () => {
   arm();
+  if (mode === "intro") return;
   noteFirstInput();
 });
 window.addEventListener("keydown", (e) => {
   arm();
+  if (mode === "intro") { skipIntro(); return; }
   noteFirstInput();
-  // press E near the dying lantern to take its flame
-  if (e.code === "KeyE" && mode === "exploring") {
-    if (canRestoreNow()) startRestoration();
+  if (e.code === "KeyE") {
+    if (mode === "exploring" && canRestoreNow()) {
+      startRestoration();
+    } else if ((mode === "exploring" || mode === "ascending") && canLightLampNow()) {
+      lightNearestLamp();
+    }
   }
 });
 
@@ -249,6 +254,112 @@ function hideShrinePrompt() {
   if (promptEl) promptEl.classList.remove("show");
 }
 
+function hidePrompt() {
+  if (promptEl) promptEl.classList.remove("show");
+}
+
+const _promptWorld = new THREE.Vector3();
+function updatePromptPosition() {
+  if (!promptEl || !promptEl.classList.contains("show")) return;
+  _promptWorld.copy(player.position);
+  _promptWorld.y += 3.8; // above the player's head
+  _promptWorld.project(camera);
+  const x = ( _promptWorld.x * 0.5 + 0.5) * window.innerWidth;
+  const y = (-_promptWorld.y * 0.5 + 0.5) * window.innerHeight;
+  promptEl.style.left = `${x}px`;
+  promptEl.style.top  = `${y}px`;
+}
+
+/* -----------------------------------------------------------
+ * Path-lamp lighting system
+ *   Lamps[1..3] (z≈-72, -56, -38) are between the shrine and
+ *   the cliff steps. The lamp auto-lights when the player steps
+ *   within LAMP_STEP_DIST of the base, costing a fraction of their flame.
+ * --------------------------------------------------------- */
+const LIGHTABLE_LAMP_INDICES = [0, 1, 2]; // 0 = cliff lamp, 1 = mid lamp, 2 = near lamp
+const FLAME_COST_PER_LAMP = 0.25;
+const LAMP_STEP_DIST = 1.5; // horizontal distance to base for auto-light on approach
+
+function nearestLightableLamp() {
+  if (!world.lampPosts) return null;
+  if (player.heldLanternFlame < 0.15) return null;
+  let best = null, bestD = Infinity;
+  for (const idx of LIGHTABLE_LAMP_INDICES) {
+    const lp = world.lampPosts[idx];
+    if (!lp || lp.lit) continue;
+    const dx = player.position.x - lp.group.position.x;
+    const dz = player.position.z - lp.group.position.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    if (d < LAMP_STEP_DIST && d < bestD) { bestD = d; best = lp; }
+  }
+  return best;
+}
+
+function canLightLampNow() { return nearestLightableLamp() !== null; }
+
+const _lampMoteTmp = new THREE.Vector3();
+let lampLightTransfers = [];
+
+function lightNearestLamp() {
+  const lp = nearestLightableLamp();
+  if (!lp) return;
+  lp.lit = true;
+  player.heldLanternFlame = Math.max(0.2, player.heldLanternFlame - FLAME_COST_PER_LAMP);
+  audio.playLampLight();
+
+  // mote arcs from player lantern to the lamp
+  if (player.heldLanternCore) {
+    player.heldLanternCore.getWorldPosition(_lampMoteTmp);
+  } else {
+    _lampMoteTmp.copy(player.position).y += 1.5;
+  }
+  const startPos = _lampMoteTmp.clone();
+  const endPos = lp.group.position.clone().add(lp.lanternOffset);
+  const mote = makeFlameMote(startPos);
+  lampLightTransfers.push({
+    mote, startPos, endPos,
+    t0: clock.getElapsedTime(),
+    duration: 0.65,
+    lp,
+  });
+}
+
+function updateLampLightTransfers(t) {
+  for (let i = lampLightTransfers.length - 1; i >= 0; i--) {
+    const tr = lampLightTransfers[i];
+    const u = THREE.MathUtils.clamp((t - tr.t0) / tr.duration, 0, 1);
+    tr.mote.position.lerpVectors(tr.startPos, tr.endPos, u);
+    tr.mote.position.y += Math.sin(u * Math.PI) * 0.45;
+    tr.mote.material.opacity = u < 0.78 ? 1 : Math.max(0, 1 - (u - 0.78) / 0.22);
+    if (u >= 1) {
+      scene.remove(tr.mote);
+      tr.mote.geometry.dispose();
+      tr.mote.material.dispose();
+      // ignite the lamp — warm glass glow and inner core, no halo orb
+      const lp = tr.lp;
+      lp.glassMat.emissiveIntensity = 1.4;
+      lp.glassMat.opacity = 0.9;
+      lp.haloMat.opacity = 0;
+      lp.coreMat.opacity = 0.82;
+      lp.light.intensity = 1.2;
+      lampLightTransfers.splice(i, 1);
+    }
+  }
+}
+
+function flickerLitLamps(t) {
+  if (!world.lampPosts) return;
+  for (const idx of LIGHTABLE_LAMP_INDICES) {
+    const lp = world.lampPosts[idx];
+    if (!lp?.lit) continue;
+    const f = 0.88 + Math.sin(t * 1.4 + idx * 1.7) * 0.08 +
+              Math.sin(t * 3.1 + idx * 0.9) * 0.04;
+    lp.glassMat.emissiveIntensity = 1.4 * f;
+    lp.coreMat.opacity = 0.82 * f;
+    lp.light.intensity = 1.2 * f;
+  }
+}
+
 /* -----------------------------------------------------------
  * Restoration trigger
  * --------------------------------------------------------- */
@@ -288,9 +399,8 @@ let rippleArmed = false;        // whether resonance ripple has been kicked
 function startRestoration() {
   mode = "restoring";
   stateTime = 0;
-  hideShrinePrompt();
+  hidePrompt();
   player.canControl = false;
-  audio.fadeOut(1.0);
   rippleArmed = false;
 
   const sp = world.shrine.worldPos().clone();
@@ -455,10 +565,250 @@ function lerpAngle(a, b, t) {
   return a + d * t;
 }
 
-// camera / scratch vectors used by later cinematic states
+// camera / scratch vectors used by cinematic states
 const _camIdealPos = new THREE.Vector3();
 const _camLook = new THREE.Vector3();
 const _tmpVec = new THREE.Vector3();
+
+/* -----------------------------------------------------------
+ * Opening cinematic
+ *
+ *   Timing (stateTime seconds):
+ *     0 – 2.2     FLICKER  — tight on lighthouse; lamp flickers then dies
+ *     2.2 – 10.2  RETREAT  — single bezier: pulls back and descends the whole
+ *                            way from lighthouse to spawn with no phase seam;
+ *                            camera looks back as each lamp dies along the path
+ *     7.7         TEXT     — phrase fades in
+ *     10.2                 — transition to "exploring"
+ * --------------------------------------------------------- */
+const INTRO_FLICKER_DUR = 2.2;
+const INTRO_RETREAT_DUR = 8.0;
+
+const INTRO_ZOOM_AT  = INTRO_FLICKER_DUR;
+const INTRO_TRACK_AT = INTRO_ZOOM_AT + INTRO_RETREAT_DUR;  // = INTRO_END; TRACK branch never fires
+const INTRO_TEXT_AT  = INTRO_ZOOM_AT + 5.5;
+const INTRO_END      = INTRO_ZOOM_AT + INTRO_RETREAT_DUR;
+
+// lamp die times: [cliff lamp, path lamp, spawn lamp]
+const LAMP_DIE_TIMES = [7.5, 8.5, 9.5];
+
+// voice line — place your ElevenLabs export at assets/sounds/intro_voice.mp3
+const _voiceLine = new window.Audio("assets/sounds/intro_voice.mp3");
+_voiceLine.volume = 0.85;
+let _voicePlayed = false;
+
+const _restoreMusic = new window.Audio("assets/sounds/restore_the_light.mp3");
+_restoreMusic.volume = 1.0;
+let _restoreMusicPlayed = false;
+
+// cubic bezier: full retreat path (lighthouse → spawn)
+// P1 is below P0 — camera descends the whole way, no upward arc
+const _zP0 = new THREE.Vector3(1.5, 54.5, -222);
+const _zP1 = new THREE.Vector3(3,   38,   -202);
+const _zP2 = new THREE.Vector3(2.5,  5,    -90);
+const _zP3 = new THREE.Vector3(2,    4.5,  -14);
+// cubic bezier: look-target (lighthouse → looking back at path lamps from spawn)
+const _zL0 = new THREE.Vector3(0,   53.8, -240);
+const _zL1 = new THREE.Vector3(0.5, 50,   -235);
+const _zL2 = new THREE.Vector3(1.5,  5,   -120);
+const _zL3 = new THREE.Vector3(2,    4.5,  -60);
+const _iTrackEnd = new THREE.Vector3(2, 4.5, -14);
+const _ibTmp = new THREE.Vector3();
+const _ilTmp = new THREE.Vector3();
+
+function _quadBez(a, b, c, t, out) {
+  const s = 1 - t;
+  out.set(
+    s*s*a.x + 2*s*t*b.x + t*t*c.x,
+    s*s*a.y + 2*s*t*b.y + t*t*c.y,
+    s*s*a.z + 2*s*t*b.z + t*t*c.z,
+  );
+}
+
+function _cubicBez(p0, p1, p2, p3, t, out) {
+  const s = 1 - t;
+  out.set(
+    s*s*s*p0.x + 3*s*s*t*p1.x + 3*s*t*t*p2.x + t*t*t*p3.x,
+    s*s*s*p0.y + 3*s*s*t*p1.y + 3*s*t*t*p2.y + t*t*t*p3.y,
+    s*s*s*p0.z + 3*s*s*t*p1.z + 3*s*t*t*p2.z + t*t*t*p3.z,
+  );
+}
+
+function _introFlicker(t, seed) {
+  return Math.abs(Math.sin(t * 23.1 + seed) * Math.cos(t * 13.7 + seed * 1.9));
+}
+
+const _INTRO_LINES = [
+  "the lights are going out",
+  "who will bear the light",
+  "who will restore the flame?",
+];
+// [showAt, hideAt] for each line
+const _INTRO_LINE_TIMES = [[1.0, 2.6], [3.0, 4.6], [5.0, 7.2]];
+
+let _introLineEls = null;
+function _ensureIntroLines() {
+  if (_introLineEls) return _introLineEls;
+  const base =
+    "position:fixed;bottom:72px;left:0;right:0;text-align:center;" +
+    "font:300 26px/1.5 Georgia,serif;letter-spacing:0.26em;" +
+    "color:rgba(255,238,210,0.95);opacity:0;pointer-events:none;" +
+    "text-shadow:0 0 28px rgba(255,170,50,0.5),0 0 6px rgba(0,0,0,0.9);" +
+    "transition:opacity 0.9s ease-in-out;z-index:55;user-select:none;";
+  _introLineEls = _INTRO_LINES.map(text => {
+    const el = document.createElement("div");
+    el.style.cssText = base;
+    el.textContent = text;
+    document.body.appendChild(el);
+    return el;
+  });
+  return _introLineEls;
+}
+
+let _introTitleEl = null;
+function _ensureIntroTitle() {
+  if (_introTitleEl) return _introTitleEl;
+  _introTitleEl = document.createElement("div");
+  _introTitleEl.style.cssText =
+    "position:fixed;top:40px;right:48px;text-align:right;" +
+    "font:300 20px/1.5 Georgia,serif;letter-spacing:0.32em;" +
+    "color:rgba(255,238,210,0.88);opacity:0;pointer-events:none;" +
+    "text-shadow:0 0 20px rgba(255,150,40,0.4),0 0 5px rgba(0,0,0,0.85);" +
+    "transition:opacity 1.6s ease-in-out;z-index:56;user-select:none;";
+  _introTitleEl.textContent = "The Quiet Cliffs";
+  document.body.appendChild(_introTitleEl);
+  return _introTitleEl;
+}
+
+function introUpdate(dt, t) {
+  const si   = world.cliffs?.skyIsland;
+  const lamps = world.lampPosts;
+
+  // ---- Lighthouse: flicker during hold, fade during zoom-out ----
+  if (stateTime < INTRO_ZOOM_AT) {
+    const f = _introFlicker(t, 0);
+    if (si?.lampMat) {
+      si.lampMat.opacity = 0.35 + f * 0.65;
+      si.lampMat.color.setRGB(1.0, 0.85 + f * 0.15, 0.5 + f * 0.35);
+    }
+    if (si?.haloMat) si.haloMat.opacity = 0.22 * (0.4 + f * 0.6);
+
+  } else if (stateTime < INTRO_ZOOM_AT + 0.5) {
+    // quick extinction — light dies as the camera starts to pull back
+    const dying = 1 - (stateTime - INTRO_ZOOM_AT) / 0.5;
+    if (si?.lampMat) {
+      si.lampMat.opacity = dying * 0.9;
+      si.lampMat.color.setRGB(1.0, 0.7 * dying, 0.3 * dying);
+    }
+    if (si?.haloMat) si.haloMat.opacity = dying * 0.22;
+
+  } else {
+    if (si?.lampMat) si.lampMat.opacity = 0;
+    if (si?.haloMat) si.haloMat.opacity = 0;
+  }
+
+  // ---- Camera path ----
+  if (stateTime < INTRO_ZOOM_AT) {
+    // FLICKER: hold tight on the lighthouse lamp — keep trackers in sync so
+    // the lerp-based phases below don't snap when they take over
+    camera.position.set(1.5, 54.5, -222);
+    _camLook.set(0, 53.8, -240);
+    camera.lookAt(_camLook);
+
+  } else {
+    // RETREAT: single bezier from lighthouse to spawn — no phase seam
+    const u = THREE.MathUtils.clamp((stateTime - INTRO_ZOOM_AT) / INTRO_RETREAT_DUR, 0, 1);
+    const e = u * u * (3 - 2 * u);  // smoothstep: gentle start, gentle landing
+    _cubicBez(_zP0, _zP1, _zP2, _zP3, e, _ibTmp);
+    camera.position.lerp(_ibTmp, Math.min(1, dt * 8));
+    _cubicBez(_zL0, _zL1, _zL2, _zL3, e, _ilTmp);
+    _camLook.lerp(_ilTmp, Math.min(1, dt * 5));
+    camera.lookAt(_camLook);
+  }
+
+  // ---- Lamp post die sequence ----
+  if (lamps) {
+    for (let i = 0; i < lamps.length; i++) {
+      const lp = lamps[i];
+      const dieAt = LAMP_DIE_TIMES[i];
+      if (stateTime < dieAt) {
+        lp.glassMat.emissiveIntensity = 1.4;
+        lp.glassMat.opacity = 0.9;
+        lp.haloMat.opacity = 0.38;
+      } else if (stateTime < dieAt + 0.65) {
+        const dying = 1 - (stateTime - dieAt) / 0.65;
+        const f = _introFlicker(t, i * 2.3 + 7.1);
+        lp.glassMat.emissiveIntensity = dying * (0.2 + f * 1.2);
+        lp.glassMat.opacity = 0.3 + f * 0.6 * dying;
+        lp.haloMat.opacity = 0.38 * dying * f;
+      } else {
+        lp.glassMat.emissiveIntensity = 0;
+        lp.glassMat.opacity = 0.12;
+        lp.haloMat.opacity = 0;
+      }
+    }
+  }
+
+  // ---- Text overlay + voice ----
+  const lines = _ensureIntroLines();
+  for (let i = 0; i < lines.length; i++) {
+    const [show, hide] = _INTRO_LINE_TIMES[i];
+    lines[i].style.opacity = (stateTime >= show && stateTime < hide) ? "1" : "0";
+  }
+
+  const titleEl3 = _ensureIntroTitle();
+  const showGameTitle = stateTime >= 7.0 && stateTime < INTRO_END - 0.4;
+  titleEl3.style.opacity = showGameTitle ? "1" : "0";
+
+  if (!_restoreMusicPlayed && stateTime >= 2.0) {
+    _restoreMusicPlayed = true;
+    _restoreMusic.play().catch(() => {});
+  }
+
+  if (!_voicePlayed && stateTime >= INTRO_TEXT_AT) {
+    _voicePlayed = true;
+    _voiceLine.play().catch(() => {});
+  }
+
+  if (stateTime >= INTRO_END) endIntro();
+}
+
+function endIntro() {
+  mode = "exploring";
+  stateTime = 0;
+  player.canControl = true;
+  _voicePlayed = false;
+  _restoreMusicPlayed = false;
+
+  // hide text
+  if (_introLineEls) _introLineEls.forEach(el => el.style.opacity = "0");
+  if (_introTitleEl) _introTitleEl.style.opacity = "0";
+
+  // freeze all lamps dark — player lights them by carrying the shrine flame
+  const lamps = world.lampPosts;
+  if (lamps) {
+    for (let i = 0; i < lamps.length; i++) {
+      lamps[i].glassMat.emissiveIntensity = 0;
+      lamps[i].glassMat.opacity = 0.12;
+      lamps[i].haloMat.opacity = 0;
+    }
+  }
+  const si = world.cliffs?.skyIsland;
+  if (si?.lampMat) si.lampMat.opacity = 0;
+  if (si?.haloMat) si.haloMat.opacity = 0;
+
+  // position camera behind player so the snap isn't jarring
+  const pp = player.position;
+  camera.position.set(pp.x + 2, pp.y + 4, pp.z + 7);
+  camera.lookAt(pp.x, pp.y + 1, pp.z - 4);
+
+  noteFirstInput();
+}
+
+function skipIntro() {
+  if (mode !== "intro") return;
+  stateTime = INTRO_END;   // endIntro() fires on the next frame
+}
 
 // Soft fall-prevention: if the player slips off the cliff before
 // restoration, gently teleport them back to spawn rather than letting
@@ -557,13 +907,9 @@ function maybeStartFinale() {
   const d = Math.hypot(dx, dz);
   if (d < 6.0) {
     finaleStarted = true;
-    mode = "finale";
+    mode = "traversing";
     stateTime = 0;
-    player.canControl = false;
-    // capture start state so the cinematic pan begins from wherever the
-    // camera was, instead of snapping
-    _finaleStart.camPos.copy(camera.position);
-    _finaleStart.planetSize = world.skyMat.uniforms.uPlanetSize.value;
+    player.canControl = true;
   }
 }
 
@@ -693,24 +1039,38 @@ function animate() {
   updateWorld(world, dt, t, player, audio);
   tonePass.uniforms.uTime.value = t;
   updateFlameTransfer(t, dt);
+  updateLampLightTransfers(t);
+  flickerLitLamps(t);
 
   // ---- player update with state-aware overrides ----
-  if (mode === "exploring") {
+  if (mode === "intro") {
+    introUpdate(dt, t);
+  } else if (mode === "exploring") {
     player.update(dt, t);
     fallPrevention();
-    // proximity prompt for the dying lantern
-    if (canRestoreNow()) showShrinePrompt(); else hideShrinePrompt();
+    // auto-light lamp when player steps close to the base
+    if (canLightLampNow()) lightNearestLamp();
+    // shrine prompt takes priority
+    if (canRestoreNow()) {
+      showShrinePrompt();
+    } else {
+      hidePrompt();
+    }
     // cliff-edge proximity also triggers the reveal cinematic
     maybeStartFinale();
   } else if (mode === "restoring") {
     player.update(dt, t);
     restoringCameraUpdate(dt, t);
+    hidePrompt();
     // when the wave + bridge reform are clearly underway we'll move on,
     // but the resonance ripple onComplete callback also bumps us to ascending.
   } else if (mode === "ascending") {
     player.update(dt, t);
     maybeStartFinale();
     fallPrevention();
+    // auto-light lamp when player steps close to the base
+    if (canLightLampNow()) lightNearestLamp();
+    hidePrompt();
   } else if (mode === "finale") {
     player.update(dt, t);
     finaleUpdate(dt, t);
@@ -729,6 +1089,7 @@ function animate() {
     // "done" — keep updating particles + cloak so the final shot is alive
     player.update(dt, t);
   }
+  updatePromptPosition();
 
   // sun shadow camera follows the player
   const sd = world.sunDir;

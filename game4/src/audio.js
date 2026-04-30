@@ -269,6 +269,7 @@ export class Audio {
     g.gain.linearRampToValueAtTime(0.10 * intensity * (0.6 + sprintBlend * 0.6), now + 0.01);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
     noise.connect(hp).connect(lp).connect(g).connect(this.masterFilter);
+    noise.onended = () => { g.disconnect(); lp.disconnect(); hp.disconnect(); };
   }
 
   playLanding(impactSpeed) {
@@ -289,6 +290,7 @@ export class Audio {
       o.connect(g).connect(this.masterFilter);
       o.start(now);
       o.stop(now + 0.45);
+      o.onended = () => { g.disconnect(); };
     }
     // a sand puff (noise burst)
     {
@@ -301,6 +303,7 @@ export class Audio {
       g.gain.linearRampToValueAtTime(0.16 * v, now + 0.02);
       g.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
       n.connect(lp).connect(g).connect(this.masterFilter);
+      n.onended = () => { g.disconnect(); lp.disconnect(); };
     }
   }
 
@@ -359,6 +362,61 @@ export class Audio {
       o.connect(g).connect(this.masterFilter);
       o.start(now);
       o.stop(now + 2.2);
+    }
+  }
+
+  /* -----------------------------------------------------------
+   * Lamp-light sound: a warm whomp + rising tone when the player
+   * transfers flame into a path lamp. Feels like fire catching.
+   * --------------------------------------------------------- */
+  playLampLight() {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // low whomp — air displacement as the flame catches
+    {
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(90, now);
+      o.frequency.exponentialRampToValueAtTime(44, now + 0.38);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.28, now + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+      o.connect(g).connect(this.masterFilter);
+      o.start(now); o.stop(now + 0.5);
+      o.onended = () => g.disconnect();
+    }
+
+    // warm rising tone — the flame settling into the lantern
+    {
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(320, now + 0.05);
+      o.frequency.exponentialRampToValueAtTime(520, now + 0.40);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, now + 0.05);
+      g.gain.linearRampToValueAtTime(0.16, now + 0.12);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 1.1);
+      o.connect(g).connect(this.masterFilter);
+      o.start(now + 0.05); o.stop(now + 1.2);
+      o.onended = () => g.disconnect();
+    }
+
+    // soft crackle noise burst
+    {
+      const n = this._burst(0.25);
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = 1800;
+      bp.Q.value = 0.8;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.10, now + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.30);
+      n.connect(bp).connect(g).connect(this.masterFilter);
+      n.onended = () => { g.disconnect(); bp.disconnect(); };
     }
   }
 
@@ -468,13 +526,17 @@ export class Audio {
 
   _burst(seconds = 0.2) {
     const ctx = this.ctx;
-    const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * seconds), ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i++) {
-      data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    if (!this._burstBuffers) this._burstBuffers = new Map();
+    if (!this._burstBuffers.has(seconds)) {
+      const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * seconds), ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+      }
+      this._burstBuffers.set(seconds, buffer);
     }
     const src = ctx.createBufferSource();
-    src.buffer = buffer;
+    src.buffer = this._burstBuffers.get(seconds);
     src.loop = false;
     src.start();
     return src;

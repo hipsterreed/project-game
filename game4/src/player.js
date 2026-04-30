@@ -1036,8 +1036,28 @@ export class Player {
     // ---- integrate position ----
     this.position.addScaledVector(this.velocity, dt);
 
-    // (column-blocker hook left in place — currently a no-op on the
-    // floating island, since the cliff falloff handles edges naturally.)
+    // push player out of lamp post column bases
+    if (this.world.columnBlockers) {
+      const PLAYER_R = 0.30;
+      for (const col of this.world.columnBlockers) {
+        const dx = this.position.x - col.x;
+        const dz = this.position.z - col.z;
+        const distSq = dx * dx + dz * dz;
+        const minDist = col.r + PLAYER_R;
+        if (distSq < minDist * minDist && distSq > 1e-8) {
+          const dist = Math.sqrt(distSq);
+          const push = (minDist - dist) / dist;
+          this.position.x += dx * push;
+          this.position.z += dz * push;
+          const nx = dx / dist, nz = dz / dist;
+          const dot = this.velocity.x * nx + this.velocity.z * nz;
+          if (dot < 0) {
+            this.velocity.x -= dot * nx;
+            this.velocity.z -= dot * nz;
+          }
+        }
+      }
+    }
 
     // ---- ground / step collision ----
     const ceilY = this.position.y + 0.05;
@@ -1376,8 +1396,8 @@ export class Player {
       if (this.onFootstep) {
         this.onFootstep(
           foot,
-          this.position.clone(),
-          this.velocity.clone(),
+          this.position,
+          this.velocity,
           this.sprintBlend,
         );
       }

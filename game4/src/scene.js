@@ -20,7 +20,7 @@ import { buildBirds, updateBirds } from "./birds.js";
 //   SPAWN_POSITION  = where the player wakes (next to the shrine)
 //   CLIFF_EDGE      = the dramatic cliff vantage (final shot)
 export const SHRINE_POSITION = new THREE.Vector3(0, 0, -32);
-export const SPAWN_POSITION = new THREE.Vector3(2.4, 0, 4.0);
+export const SPAWN_POSITION = new THREE.Vector3(2.0, 0, -22);
 export const CLIFF_EDGE = new THREE.Vector3(0, 0, -98);
 // legacy names kept so existing imports still resolve
 export const TOWER_POSITION = SHRINE_POSITION;
@@ -286,6 +286,17 @@ export function buildWorld(scene, renderer) {
   // in buildDistantMountains itself.)
   root.add(buildDistantMountains());
 
+  // ---- lamp posts along the path ----
+  const lampPosts = buildLampPosts();
+  for (const lp of lampPosts) root.add(lp.group);
+
+  // ---- boulders alongside the path and out to the sides ----
+  root.add(buildBoulders());
+
+  // ---- grass blades (subtle wind-sway, single draw call) ----
+  const grass = buildGrass();
+  root.add(grass.group);
+
   // ---- ruins (broken pillars / arches / windstones) ----
   const ruins = buildRuins();
   root.add(ruins);
@@ -348,10 +359,18 @@ export function buildWorld(scene, renderer) {
     return y;
   }
 
-  /* Column blocker — kept as no-op for now (no big static obstacle on the
-   * island). Cliff props are small enough that terrain falloff handles them.
-   */
-  function blocksColumn(/* x, z, y */) {
+  // Hard cylinder blockers: lamp post bases (collar radius 0.18 + margin).
+  const columnBlockers = lampPosts.map(lp => ({
+    x: lp.group.position.x,
+    z: lp.group.position.z,
+    r: 0.22,
+  }));
+
+  function blocksColumn(x, z) {
+    for (const c of columnBlockers) {
+      const dx = x - c.x, dz = z - c.z;
+      if (dx * dx + dz * dz < c.r * c.r) return true;
+    }
     return false;
   }
 
@@ -363,14 +382,17 @@ export function buildWorld(scene, renderer) {
     sandMat,
     sun,
     sunDir: SUN_DIR.clone(),
+    lampPosts,
     ruins,
     shrine,
     cliffs,
     birds,
     clouds,
+    grass,
     archTrigger: SHRINE_POSITION.clone(),  // legacy alias for resonance
     footprintLayer,
     stairColliders,
+    columnBlockers,
     getHeight: getTerrainHeight,
     getTerrainHeight,
     surfaceY,
@@ -387,7 +409,7 @@ export function buildWorld(scene, renderer) {
   // Early-dawn haze: dusky mauve with a real warm horizon. Fog
   // softens distance into the sky band.
   scene.background = new THREE.Color("#7a6a78");
-  scene.fog = new THREE.Fog(0x7a6a78, 100, 420);
+  scene.fog = new THREE.Fog(0x7a6a78, 42, 190);
 
   // ---- voxel props (MagicaVoxel) ----
   // Loaded asynchronously; missing files are skipped gracefully so the
@@ -419,8 +441,8 @@ function makeSandMaterial() {
     shader.uniforms.uColorMid  = { value: new THREE.Color("#7a8456") };  // grass mid
     shader.uniforms.uColorHigh = { value: new THREE.Color("#bda878") };  // sun-grazed crests
     shader.uniforms.uShadow    = { value: new THREE.Color("#3c2c1c") };  // exposed rock
-    shader.uniforms.uFogNear   = { value: 100.0 };
-    shader.uniforms.uFogFar    = { value: 420.0 };
+    shader.uniforms.uFogNear   = { value: 42.0 };
+    shader.uniforms.uFogFar    = { value: 190.0 };
 
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -582,8 +604,8 @@ function makeFootprintLayer() {
       uOrigin: { value: new THREE.Vector2(0, 0) },
       uSize: { value: WORLD_SIZE },
       uHaze: { value: new THREE.Color("#cfd9c2") },
-      uFogNear: { value: 60.0 },
-      uFogFar: { value: 380.0 },
+      uFogNear: { value: 42.0 },
+      uFogFar: { value: 190.0 },
     },
     vertexShader: /* glsl */`
       varying vec2 vWorldXZ;
@@ -844,67 +866,68 @@ function buildDistantMountains() {
     return m;
   }
 
-  // farthest range — biggest, palest, melts into the sky
+  // farthest range — tallest, palest, melts into the sky above everything
+  // peaks reach y≈350, about 18° above the player camera — true giants
   group.add(buildRidge({
     radius: 1020,
-    segs: 720,
-    baseY: -180,
-    peakLow: 80,
-    peakHigh: 220,
-    // sunrise: pale warm horizon — these are distant floating-island
-    // silhouettes melting into the cloud-sea haze
-    baseColor: "#b29498",
-    peakColor: "#ffd9b0",
+    segs: 800,
+    baseY: -100,
+    peakLow: 160,
+    peakHigh: 450,
+    baseColor: "#b8a8b0",
+    peakColor: "#fff0d8",
     radialJitter: 0.04,
     octaves: [
       { freq: 1.2,  amp: 0.55 },
-      { freq: 3.7,  amp: 0.26 },
-      { freq: 9.3,  amp: 0.14 },
-      { freq: 23.1, amp: 0.07 },
-      { freq: 53.0, amp: 0.035 },
-      { freq: 113.0, amp: 0.018 },
+      { freq: 3.7,  amp: 0.28 },
+      { freq: 9.3,  amp: 0.16 },
+      { freq: 23.1, amp: 0.09 },
+      { freq: 53.0, amp: 0.045 },
+      { freq: 113.0, amp: 0.022 },
+      { freq: 241.0, amp: 0.01 },
     ],
     seed: 0.913,
   }));
 
-  // far range — taller, paler/hazier, blue-shifted
+  // far range — tall mid-distance range, rises to y≈220, warm haze
   group.add(buildRidge({
     radius: 760,
-    segs: 600,
-    baseY: -160,
-    peakLow: 50,
-    peakHigh: 150,
-    baseColor: "#8a6878",
-    peakColor: "#e6b890",
+    segs: 660,
+    baseY: -80,
+    peakLow: 90,
+    peakHigh: 300,
+    baseColor: "#7a5c6c",
+    peakColor: "#e8c09a",
     radialJitter: 0.05,
     octaves: [
       { freq: 1.4,  amp: 0.55 },
-      { freq: 4.7,  amp: 0.26 },
-      { freq: 11.3, amp: 0.14 },
-      { freq: 27.0, amp: 0.07 },
-      { freq: 63.0, amp: 0.03 },
-      { freq: 137.0, amp: 0.015 },
+      { freq: 4.7,  amp: 0.28 },
+      { freq: 11.3, amp: 0.16 },
+      { freq: 27.0, amp: 0.09 },
+      { freq: 63.0, amp: 0.045 },
+      { freq: 137.0, amp: 0.02 },
     ],
     seed: 1.234,
   }));
 
-  // near range — shorter, warmer, slightly closer in
+  // near range — darkest, most detailed, peaks at y≈130 (~14° above camera)
   group.add(buildRidge({
     radius: 540,
-    segs: 520,
-    baseY: -140,
-    peakLow: 24,
-    peakHigh: 80,
-    baseColor: "#5a3e3c",
-    peakColor: "#d99868",
-    radialJitter: 0.07,
+    segs: 580,
+    baseY: -60,
+    peakLow: 50,
+    peakHigh: 190,
+    baseColor: "#3e2c2e",
+    peakColor: "#c88050",
+    radialJitter: 0.08,
     octaves: [
       { freq: 2.1,  amp: 0.50 },
-      { freq: 5.3,  amp: 0.27 },
-      { freq: 13.1, amp: 0.15 },
-      { freq: 31.0, amp: 0.07 },
-      { freq: 71.0, amp: 0.035 },
-      { freq: 153.0, amp: 0.018 },
+      { freq: 5.3,  amp: 0.28 },
+      { freq: 13.1, amp: 0.17 },
+      { freq: 31.0, amp: 0.09 },
+      { freq: 71.0, amp: 0.045 },
+      { freq: 153.0, amp: 0.022 },
+      { freq: 317.0, amp: 0.011 },
     ],
     seed: 5.678,
   }));
@@ -912,6 +935,397 @@ function buildDistantMountains() {
   return group;
 }
 
+
+/* -----------------------------------------------------------
+ * Lamp posts — hooked-pole lanterns lining the path from spawn to
+ *   cliff edge. All start lit; the intro cinematic dims them one by
+ *   one. Ordered far→near: index 0 is closest to the cliff, 4 is
+ *   closest to the player.
+ * --------------------------------------------------------- */
+function buildLampPosts() {
+  // Positions: ordered far-to-near (index 0 = closest to cliff, 2 = near spawn).
+  // All start dark; player lights them by carrying the shrine flame.
+  const SPOTS = [
+    { x:  5.0, z: -88 },        // 0: cliff lamp (right, 3rd to light)
+    { x: -5.0, z: -74 },        // 1: mid lamp (left, 2nd to light)
+    { x:  5.0, z: -60 },        // 2: near lamp (right, 1st to light)
+  ];
+
+  const poleMat = new THREE.MeshStandardMaterial({ color: 0x1c1008, roughness: 0.92 });
+  const ironMat = new THREE.MeshStandardMaterial({
+    color: 0x3a2618, roughness: 0.65, metalness: 0.35,
+  });
+  const posts = [];
+
+  // lantern attachment point in group-local space (same for every post)
+  const LX = 0.60;
+  const LY = 2.42;
+
+  for (const sp of SPOTS) {
+    const g = new THREE.Group();
+    const y = getTerrainHeight(sp.x, sp.z);
+    g.position.set(sp.x, y, sp.z);
+
+    // tapered pole
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.055, 0.090, 3.0, 7),
+      poleMat,
+    );
+    pole.position.y = 1.5;
+    pole.castShadow = true;
+    g.add(pole);
+
+    // decorative collar at the base
+    const collar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.14, 0.18, 0.14, 12),
+      ironMat,
+    );
+    collar.position.y = 0.07;
+    g.add(collar);
+
+    // hook arching outward at the top (shrine style)
+    const hookGeo = new THREE.TorusGeometry(0.30, 0.030, 6, 14, Math.PI * 0.65);
+    const hook = new THREE.Mesh(hookGeo, ironMat);
+    hook.rotation.z = Math.PI;
+    hook.position.set(0.30, 2.90, 0);
+    hook.castShadow = true;
+    g.add(hook);
+
+    // chain links hanging from hook to lantern
+    for (let ci = 0; ci < 3; ci++) {
+      const link = new THREE.Mesh(
+        new THREE.TorusGeometry(0.038, 0.009, 5, 10),
+        ironMat,
+      );
+      link.position.set(LX, 2.78 - ci * 0.085, 0);
+      link.rotation.x = (ci % 2) * Math.PI / 2;
+      g.add(link);
+    }
+
+    // octahedron glass body (shrine-style)
+    const glassGeo = new THREE.OctahedronGeometry(0.20, 0);
+    glassGeo.scale(1.0, 1.45, 1.0);
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0xffecc0,
+      emissive: 0xff8010,
+      emissiveIntensity: 1.4,
+      transparent: true,
+      opacity: 0.9,
+      roughness: 0.05,
+    });
+    const glass = new THREE.Mesh(glassGeo, glassMat);
+    glass.position.set(LX, LY, 0);
+    g.add(glass);
+
+    // iron cage — 4 vertical bars
+    for (let ci = 0; ci < 4; ci++) {
+      const a = (ci / 4) * Math.PI * 2;
+      const bar = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.008, 0.008, 0.55, 4),
+        ironMat,
+      );
+      bar.position.set(LX + Math.cos(a) * 0.17, LY, Math.sin(a) * 0.17);
+      g.add(bar);
+    }
+    // cage rings
+    for (const dy of [-0.27, 0.27]) {
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.17, 0.010, 5, 12),
+        ironMat,
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(LX, LY + dy, 0);
+      g.add(ring);
+    }
+
+    // warm inner core — shows when player lights this lamp
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xfff1c4,
+      transparent: true,
+      opacity: 0.0,
+    });
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.065, 10, 6), coreMat);
+    core.position.set(LX, LY, 0);
+    g.add(core);
+
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0xffcc70,
+      transparent: true,
+      opacity: 0.38,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+    });
+    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 8), haloMat);
+    halo.position.set(LX, LY, 0);
+    g.add(halo);
+
+    // point light — stays at 0 until player lights the lamp
+    const light = new THREE.PointLight(0xffc890, 0.0, 18, 1.4);
+    light.position.set(LX, LY, 0);
+    g.add(light);
+
+    posts.push({
+      group: g,
+      glassMat,
+      haloMat,
+      coreMat,
+      light,
+      lit: false,
+      lanternOffset: new THREE.Vector3(LX, LY, 0),
+    });
+  }
+
+  return posts;
+}
+
+/* -----------------------------------------------------------
+ * Boulders — irregular stone clusters lining the path from
+ *   spawn to the cliff edge. Purely visual; no collision needed
+ *   since they sit off-path far enough not to obstruct.
+ * --------------------------------------------------------- */
+function buildBoulders() {
+  const g = new THREE.Group();
+  const rng = mulberry32(99871);
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x4a4038,
+    roughness: 0.94,
+    metalness: 0.02,
+  });
+
+  // [x, z, radius] — path-side boulders + wider field boulders + large anchors
+  const specs = [
+    // ── path-side (original close boulders) ──
+    [ 4.2, -16, 0.55],
+    [ 5.5, -19, 0.32],
+    [-5.8, -27, 0.82],
+    [ 6.5, -41, 0.88],
+    [ 5.2, -44, 0.42],
+    [-5.2, -47, 0.52],
+    [-6.5, -49, 0.38],
+    [-7.0, -62, 0.78],
+    [-5.6, -65, 0.44],
+    [ 6.2, -69, 1.00],
+    [-5.5, -79, 0.62],
+    [ 4.8, -85, 0.48],
+    [ 3.8, -87, 0.28],
+
+    // ── wider left-side boulders ──
+    [-13,   -8, 1.10],
+    [-15,  -18, 0.70],
+    [-18,  -26, 1.50],
+    [-14,  -38, 0.90],
+    [-20,  -48, 1.20],
+    [-16,  -57, 0.65],
+    [-22,  -68, 1.70],
+    [-17,  -76, 0.85],
+    [-13,  -88, 1.00],
+
+    // ── wider right-side boulders ──
+    [ 12,  -10, 0.90],
+    [ 15,  -22, 1.30],
+    [ 13,  -33, 0.60],
+    [ 18,  -44, 1.55],
+    [ 14,  -55, 0.75],
+    [ 20,  -66, 1.10],
+    [ 16,  -78, 1.35],
+    [ 11,  -86, 0.55],
+
+    // ── deep background clusters (further out) ──
+    [-28,  -30, 1.80],
+    [-30,  -33, 0.90],
+    [-26,  -52, 2.10],
+    [-24,  -55, 0.80],
+    [ 26,  -28, 1.60],
+    [ 29,  -31, 0.70],
+    [ 27,  -54, 1.90],
+    [ 24,  -58, 0.65],
+
+    // ── behind / beside spawn ──
+    [-10,   -4, 0.75],
+    [ 11,   -2, 0.60],
+    [-20,   10, 1.20],
+    [ 18,   12, 1.00],
+    [-24,   -5, 0.85],
+    [ 22,    4, 1.40],
+
+    // ── far-field giants (x: ±40–80, big silhouettes at distance) ──
+    [-42,  -15, 2.60],
+    [-44,  -18, 1.30],   // companion
+    [-55,  -35, 3.20],   // big mass
+    [-52,  -40, 1.60],
+    [-48,  -60, 2.80],
+    [-60,  -55, 1.80],
+    [-70,  -42, 3.50],   // largest on the left flank
+    [-68,  -46, 1.40],
+    [-80,  -25, 2.40],
+    [ 40,  -12, 2.50],
+    [ 44,  -16, 1.20],
+    [ 52,  -32, 3.00],
+    [ 50,  -38, 1.50],
+    [ 45,  -58, 2.70],
+    [ 62,  -48, 3.40],   // largest on the right flank
+    [ 60,  -52, 1.60],
+    [ 75,  -30, 2.20],
+    [-38,   30, 2.80],   // back-left giant
+    [-55,   20, 1.90],
+    [ 42,   25, 2.60],   // back-right giant
+    [ 60,   18, 1.80],
+  ];
+
+  for (const [bx, bz, r] of specs) {
+    const by = getTerrainHeight(bx, bz);
+    const geo = new THREE.IcosahedronGeometry(r, r > 2.0 ? 2 : r > 0.6 ? 1 : 0);
+    const mesh = new THREE.Mesh(geo, mat);
+
+    const sx = 0.85 + rng() * 0.30;
+    const sy = 0.55 + rng() * 0.35;
+    const sz = 0.85 + rng() * 0.30;
+    mesh.scale.set(sx, sy, sz);
+
+    mesh.rotation.x = rng() * Math.PI * 0.6;
+    mesh.rotation.y = rng() * Math.PI * 2;
+    mesh.rotation.z = rng() * Math.PI * 0.4;
+
+    // sink slightly so they look embedded rather than resting on top
+    mesh.position.set(bx, by + r * sy * 0.35, bz);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    g.add(mesh);
+  }
+
+  return g;
+}
+
+/* -----------------------------------------------------------
+ * Grass — short wind-swayed blades scattered across the island,
+ *   avoiding the central path. Uses a single merged BufferGeometry
+ *   (one draw call). The vertex shader displaces blade tips with a
+ *   time-based sin wave keyed to each blade's base world position.
+ * --------------------------------------------------------- */
+function buildGrass() {
+  const rng = mulberry32(54321);
+
+  const BLADE_COUNT = 500;
+  const positions = [];
+  const normals   = [];
+  const uvs       = [];
+  const bladeBase = []; // base XZ per vertex — used in shader for wind phase
+  const indices   = [];
+
+  for (let i = 0; i < BLADE_COUNT; i++) {
+    // pick a random island spot, biased away from the central lamp path
+    let bx, bz, by;
+    let placed = false;
+    for (let a = 0; a < 20; a++) {
+      const ang = rng() * Math.PI * 2;
+      const r   = 8 + rng() * 88;
+      bx = Math.cos(ang) * r;
+      bz = Math.sin(ang) * r;
+      // skip the main path corridor (narrow x strip, negative z = toward cliff)
+      if (Math.abs(bx) < 8 && bz < 0 && bz > -96) continue;
+      by = getTerrainHeight(bx, bz);
+      if (by < -3) continue; // skip near-cliff void
+      placed = true;
+      break;
+    }
+    if (!placed) continue;
+
+    const h    = 0.22 + rng() * 0.22;  // 0.22–0.44 m tall
+    const w    = 0.04 + rng() * 0.04;  // 0.04–0.08 m wide
+    const face = rng() * Math.PI * 2;  // random facing direction
+    const lean = (rng() - 0.5) * 0.18; // slight lean
+
+    // perpendicular to facing direction defines blade width
+    const cosF = Math.cos(face), sinF = Math.sin(face);
+    const perpX = -sinF, perpZ = cosF;
+    const halfW = w * 0.5;
+
+    // base left / right
+    const blx = bx - perpX * halfW, blz = bz - perpZ * halfW;
+    const brx = bx + perpX * halfW, brz = bz + perpZ * halfW;
+    // tip left / right (lean slightly in one direction)
+    const lean_dx = sinF * lean * h;
+    const lean_dz = cosF * lean * h;
+    const tlx = blx + lean_dx, tlz = blz + lean_dz;
+    const trx = brx + lean_dx, trz = brz + lean_dz;
+
+    const vi = positions.length / 3;
+
+    // bottom-left  (uv.y = 0, stays fixed)
+    positions.push(blx, by, blz);
+    normals.push(cosF, 0.1, sinF);
+    uvs.push(0, 0);
+    bladeBase.push(bx, bz);
+
+    // bottom-right
+    positions.push(brx, by, brz);
+    normals.push(cosF, 0.1, sinF);
+    uvs.push(1, 0);
+    bladeBase.push(bx, bz);
+
+    // top-right  (uv.y = 1, gets full wind displacement)
+    positions.push(trx, by + h, trz);
+    normals.push(cosF, 0.6, sinF);
+    uvs.push(1, 1);
+    bladeBase.push(bx, bz);
+
+    // top-left
+    positions.push(tlx, by + h, tlz);
+    normals.push(cosF, 0.6, sinF);
+    uvs.push(0, 1);
+    bladeBase.push(bx, bz);
+
+    indices.push(vi, vi + 1, vi + 2,  vi, vi + 2, vi + 3);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position",  new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("normal",    new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute("uv",        new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setAttribute("bladeBase", new THREE.Float32BufferAttribute(bladeBase, 2));
+  geo.setIndex(indices);
+
+  // muted desaturated green consistent with the dawn island palette
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x404830,
+    roughness: 0.96,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+  });
+
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+        uniform float uTime;
+        attribute vec2 bladeBase;`,
+      )
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        // uv.y goes 0 (base) → 1 (tip); square it so only the tip really moves
+        float tipBlend = uv.y * uv.y;
+        float wind  = sin(uTime * 1.25 + bladeBase.x * 0.65 + bladeBase.y * 0.40) * 0.13;
+        float gust  = cos(uTime * 0.80 + bladeBase.y * 0.55) * 0.06;
+        transformed.x += (wind + gust) * tipBlend;
+        transformed.z += sin(uTime * 0.95 + bladeBase.x * 0.50) * 0.04 * tipBlend;`,
+      );
+
+    mat.userData.shader = shader;
+  };
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.castShadow   = false;
+  mesh.receiveShadow = false;
+
+  return { group: mesh, material: mat };
+}
 
 /* -----------------------------------------------------------
  * Ruins: ancient pillars with engraved bands and inset glyphs.
@@ -930,7 +1344,7 @@ function buildRuins() {
   // along a gentle spiral from the shrine outward to the cliff edge so
   // the player naturally encounters them while exploring outward.
   // Keep a clear corridor pointed toward the cliff edge (the path).
-  const TOTAL = 12;
+  const TOTAL = 0;
   const SHRINE_KEEPOUT = 12.0;   // never inside the shrine plaza
   const CLIFF_PADDING = 14.0;    // never on / past the cliff edge
 
@@ -2059,6 +2473,9 @@ export function updateWorld(world, dt, t, player, audio) {
     world.sandMat.userData.shader.uniforms.uTime.value = t;
   }
   world.skyMat.uniforms.uTime.value = t;
+  if (world.grass?.material?.userData?.shader) {
+    world.grass.material.userData.shader.uniforms.uTime.value = t;
+  }
 
   // shrine: dormant flicker by default; activate() triggers the swell
   world.shrine?.update?.(dt, t);
